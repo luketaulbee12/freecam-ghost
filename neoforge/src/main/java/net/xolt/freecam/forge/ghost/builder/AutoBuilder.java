@@ -75,6 +75,7 @@ public final class AutoBuilder {
     private record Task(BlockPos pos, BlockState target, boolean dig, boolean scaffold) {}
 
     private static boolean running;
+    private static boolean creative;
     @Nullable private static Blueprints.Blueprint bp;
     private static Phase phase = Phase.PLAN;
     private static BotInput input;
@@ -95,6 +96,18 @@ public final class AutoBuilder {
     private static int stuckTicks;
     private static int stuckStrikes;
     private static int lastHurtTime;
+    private static int lastDoorClick = -100;
+    private static int lastClickTick = -100;
+    private static int lastProgressTick;
+    private static int relaxUntil;
+    private static final int RELAX_TICKS = 20 * 30;
+    private static final int MAX_BREAKS_PER_SPOT = 2;
+    private static final Map<BlockPos, Integer> breakCount = new HashMap<>();
+    private static final int WATCHDOG_TICKS = 200;
+    private static long lastArea = Long.MIN_VALUE;
+    private static final int CLICK_INTERVAL = 4; // vanilla right-click rate (5 blocks/s)
+    private static final int MAX_CLICKS = 4;
+    private static final Map<BlockPos, Integer> attempts = new HashMap<>();
     private static int ticks;
     private static boolean progressSinceRetryRound;
     private static int retryRounds;
@@ -138,11 +151,17 @@ public final class AutoBuilder {
         bp = blueprint;
         skipped.clear();
         skippedBlocks.clear();
+        attempts.clear();
+        breakCount.clear();
+        relaxUntil = 0;
+        lastArea = Long.MIN_VALUE;
         pendingTask = null;
         partialTask = null;
         scaffolds.clear();
         supportQueue.clear();
         retryRounds = 0;
+        computeBounds();
+        lastProgressTick = ticks;
         int pending = countPending(MC.level);
         if (pending == 0) {
             player.displayClientMessage(Component.translatable("msg.freecam.buildNothing"), true);
@@ -151,10 +170,14 @@ public final class AutoBuilder {
         }
         running = true;
         input = new BotInput();
+        creative = player.getAbilities().instabuild;
+        if (creative) {
+            ensureFlying(player);
+        }
         player.input = input;
         lastHurtTime = player.hurtTime;
         setPhase(Phase.PLAN);
-        player.displayClientMessage(Component.translatable("msg.freecam.buildStarted", blueprint.name(), pending), false);
+        player.displayClientMessage(Component.translatable("msg.freecam.buildStarted", blueprint.name(), pending, Component.translatable(modeKey(mode))), false);
     }
 
     private static void stop(@Nullable String reasonKey) {
@@ -168,6 +191,7 @@ public final class AutoBuilder {
         }
         if (player != null) {
             player.input = new KeyboardInput(MC.options);
+            player.setSprinting(false);
             if (reasonKey != null) {
                 player.displayClientMessage(Component.translatable("msg.freecam.buildStopped",
                         Component.translatable(reasonKey)), false);
@@ -263,6 +287,9 @@ public final class AutoBuilder {
         }
 
         input.clear();
+        if (creative) {
+            ensureFlying(player); // a quick jump release/press would otherwise toggle flight off
+        }
         if (MC.screen != null && !Freecam.isEnabled()) {
             return; // paused while a menu is open
         }
@@ -270,6 +297,16 @@ public final class AutoBuilder {
         ticks++;
         if (ticks % 40 == 0) {
             player.displayClientMessage(Component.translatable("msg.freecam.buildProgress", countPending(level)), true);
+        }
+
+        // Watchdog: nothing placed, mined or walked for 10s (mining has its own longer timeout) -> start over.
+        if (phase != Phase.BREAK && phase != Phase.PLAN && ticks - lastProgressTick > WATCHDOG_TICKS) {
+            LOG.info("[auto-build] watchdog: no progress for {}s in phase {}, re-planning", WATCHDOG_TICKS / 20, phase);
+            relax(player);
+            lastProgressTick = ticks;
+            path = List.of();
+            retryOrSkip("no progress for " + WATCHDOG_TICKS / 20 + " seconds");
+            return;
         }
 
         switch (phase) {
@@ -338,9 +375,10 @@ public final class AutoBuilder {
             }
 
             // 2. Blueprint work: digs first (top-down), then supported placements (bottom-up, nearest).
-            Task best = null, floating = null;
+            Task best = null, floating = null, waiting = null;
             double bestScore = Double.MAX_VALUE, floatScore = Double.MAX_VALUE;
             Vec3 me = player.position();
+            int bandMin = mode == BuildMode.BANDS ? lowestPlaceLayer(level) : 0;
             for (Map.Entry<BlockPos, BlockState> e : bp.blocks.entrySet()) {
                 BlockPos pos = e.getKey();
                 if (skipped.containsKey(pos) || !level.isLoaded(pos)) {
@@ -363,7 +401,31 @@ public final class AutoBuilder {
                     }
                     continue;
                 }
-                double score = dig ? (-pos.getY() * 10_000.0) + dist : 1e9 + pos.getY() * 10_000.0 + dist;
+                if (!dig && !ready(level, pos, e.getValue())) {
+                    // Touches something, but not what it hangs on (ladder before its wall, torch before
+                    // its block): wait until that's built.
+                    if (waiting == null) {
+                        waiting = new Task(pos.immutable(), e.getValue(), false, false);
+                    }
+                    continue;
+                }
+                double score;
+                if (relaxed()) {
+                    // Stuck recently: nearest job of any layer (digs still first).
+                    score = dig ? Math.sqrt(dist) : 1e9 + Math.sqrt(dist);
+                } else if (mode == BuildMode.AREAS) {
+                    // Finish the nearest area (8x8 columns) bottom-up before moving on.
+                    double rank = areaRank(pos, me) * 1e6;
+                    score = dig ? rank - pos.getY() * 1000.0 + dist : 1e12 + rank + pos.getY() * 1000.0 + dist;
+                } else if (mode == BuildMode.BANDS && !dig) {
+                    // Anything in the 3-layer band, nearest first (slight preference for lower).
+                    if (pos.getY() > bandMin + BAND - 1) {
+                        continue;
+                    }
+                    score = 1e9 + (pos.getY() - bandMin) * 3.0 + Math.sqrt(dist);
+                } else {
+                    score = dig ? (-pos.getY() * 10_000.0) + dist : 1e9 + pos.getY() * 10_000.0 + dist;
+                }
                 if (score < bestScore) {
                     bestScore = score;
                     best = new Task(pos.immutable(), e.getValue(), dig, false);
@@ -373,10 +435,24 @@ public final class AutoBuilder {
                 return best;
             }
 
+            // Only blocks still waiting for what they hang on are left, and nothing else can make progress.
+            if (floating == null && waiting != null) {
+                markSkipped(waiting.pos(), waiting.target(),
+                        "needs the block it hangs on (e.g. the wall behind a ladder) and that isn't there");
+                continue;
+            }
+
             // 3. Something floating: lay a dirt chain to it from the nearest solid block.
             if (floating != null) {
-                int dirt = player.getInventory().countItem(SCAFFOLD_ITEM);
+                int dirt = creative ? Integer.MAX_VALUE : player.getInventory().countItem(SCAFFOLD_ITEM);
                 List<BlockPos> chain = supportChain(level, player, floating.pos());
+                if (chain == null && creative) {
+                    chain = supportColumn(level, floating.pos()); // fly up a dirt column under it
+                }
+                if (chain == null && creative) {
+                    markSkipped(floating.pos(), floating.target(), "floating - nothing below it to build a support column on");
+                    continue;
+                }
                 if (chain != null && dirt >= chain.size()) {
                     supportQueue.addAll(chain); // short dirt chain from something nearby
                     continue;
@@ -549,10 +625,14 @@ public final class AutoBuilder {
                 markSkipped(task.pos(), task.target(), "block has no item form");
                 return;
             }
-            if (findSlot(player.getInventory(), item) < 0) {
+            if (!creative && findSlot(player.getInventory(), item) < 0) {
                 markSkipped(task.pos(), task.target(), "item:" + item.getDescription().getString());
                 return;
             }
+        }
+        if (creative) {
+            planFlying(level, player);
+            return;
         }
 
         Task t = task;
@@ -571,17 +651,44 @@ public final class AutoBuilder {
         // A block with nothing to place against: we must end up standing on a scaffold block that touches it
         // (e.g. the top of a dirt pillar right beside it).
         boolean floating = !t.dig() && !PlacementPlanner.hasSupport(level, t.pos());
-        PathFinder.Result found = PathFinder.find(level, start,
+        java.util.function.BiPredicate<BlockPos, Boolean> goal =
                 (feet, plannedSupport) -> PathFinder.clear(level, feet) && canWorkFrom(level, feet, t, player)
                         && (!floating || (feet.below().distManhattan(t.pos()) == 1
-                        && (plannedSupport || PlacementPlanner.isSupport(level.getBlockState(feet.below()))))),
-                feet -> Math.max(0, eyeAt(feet, player).distanceTo(center) - r),
-                avoid, scaffold, floating ? 3.0 : 1.1);
+                        && (plannedSupport || PlacementPlanner.isSupport(level.getBlockState(feet.below())))))
+                        && (t.dig() || floating || !wouldWallInFrom(level, feet, t.pos(), false));
+        java.util.function.ToDoubleFunction<BlockPos> h = feet -> Math.max(0, eyeAt(feet, player).distanceTo(center) - r);
+        PathFinder.Result found = null;
+        // Bands: head for the standing spot that reaches the most of the band, not just "near this block".
+        Set<BlockPos> spots = mode == BuildMode.BANDS && !t.dig() && !floating ? bestSpots(level, player, t, false) : Set.of();
+        if (!spots.isEmpty()) {
+            found = PathFinder.find(level, start, (feet, ps) -> spots.contains(feet) && goal.test(feet, ps), h, avoid, scaffold, 1.1);
+            if (found != null && found.partial()) {
+                found = null; // fall back to the plain search below
+            }
+        }
+        if (found == null) {
+            found = PathFinder.find(level, start, goal, h, avoid, scaffold, floating ? 3.0 : 1.1);
+        }
+        if (found == null) {
+            // Boxed in (e.g. finished an attic from the inside): allow breaking through our own blocks.
+            // Anything broken is part of the blueprint, so it simply gets rebuilt later.
+            PathFinder.breakable = breakableNear(level, player);
+            try {
+                found = PathFinder.find(level, start, goal, h, avoid, scaffold, floating ? 3.0 : 1.1);
+            } finally {
+                PathFinder.breakable = Set.of();
+            }
+            if (found != null) {
+                LOG.info("[auto-build] no open route - breaking through our own blocks to reach {}", t.pos().toShortString());
+                notify(player, "msg.freecam.buildBreakThrough");
+            }
+        }
         LOG.info("[auto-build] {} {} at {} from {} (dist {}, dirt {}): {}", t.dig() ? "dig" : "place",
                 t.target().getBlock().getName().getString(), t.pos().toShortString(), start.toShortString(),
                 (int) player.position().distanceTo(center), dirt,
                 found == null ? "NO PATH" : (found.partial() ? "partial " : "path ") + found.steps().size() + " steps");
         if (found == null) {
+            relax(player);
             skip("no walkable path found");
             return;
         }
@@ -618,12 +725,161 @@ public final class AutoBuilder {
         setPhase(Phase.WALK);
     }
 
+    /** Creative: fly straight-ish (3D A*) to anywhere within reach of the job. */
+    private static void planFlying(ClientLevel level, LocalPlayer player) {
+        Task t = task;
+        BlockPos start = BlockPos.containing(player.getX(), player.getY() + 0.2, player.getZ());
+        Set<BlockPos> avoid = new HashSet<>();
+        if (!t.dig()) {
+            avoid.add(t.pos());
+        }
+        double r = reach(player) - 0.4;
+        Vec3 center = Vec3.atCenterOf(t.pos());
+        java.util.function.BiPredicate<BlockPos, Boolean> goal =
+                (feet, ignored) -> PathFinder.clear(level, feet) && canWorkFrom(level, feet, t, player);
+        java.util.function.ToDoubleFunction<BlockPos> h = feet -> Math.max(0, eyeAt(feet, player).distanceTo(center) - r);
+        PathFinder.Result found = null;
+        Set<BlockPos> spots = mode == BuildMode.BANDS && !t.dig() ? bestSpots(level, player, t, true) : Set.of();
+        if (!spots.isEmpty()) {
+            found = PathFinder.findFlying(level, start, (feet, ig) -> spots.contains(feet) && goal.test(feet, ig), h, avoid);
+            if (found != null && found.partial()) {
+                found = null;
+            }
+        }
+        if (found == null) {
+            found = PathFinder.findFlying(level, start, goal, h, avoid);
+        }
+        LOG.info("[auto-build] (creative) {} {} at {} from {}: {}", t.dig() ? "dig" : "place",
+                t.target().getBlock().getName().getString(), t.pos().toShortString(), start.toShortString(),
+                found == null ? "NO PATH" : (found.partial() ? "partial " : "path ") + found.steps().size() + " steps");
+        if (found == null) {
+            skip("no flight path found");
+            return;
+        }
+        if (found.partial()) {
+            double d = player.position().distanceTo(center);
+            if (!t.equals(partialTask)) {
+                partialTask = t;
+                partialBestDist = d;
+                partialStalls = 0;
+            } else if (d > partialBestDist - 2.0) {
+                if (++partialStalls >= 3) {
+                    partialTask = null;
+                    skip("long flight stopped getting closer");
+                    return;
+                }
+            } else {
+                partialBestDist = d;
+                partialStalls = 0;
+            }
+        }
+        pathPartial = found.partial();
+        path = found.steps();
+        pathStart = start;
+        pathIdx = 0;
+        resetStep();
+        stuckCheckPos = player.position();
+        stuckTicks = 0;
+        stuckStrikes = 0;
+        setPhase(Phase.WALK);
+    }
+
+    /** Fly toward a waypoint: jump = up, sneak = down while flying in creative. */
+    private static void flyStep(ClientLevel level, LocalPlayer player, BlockPos wp) {
+        ensureFlying(player);
+        double dx = wp.getX() + 0.5 - player.getX();
+        double dy = wp.getY() + 0.1 - player.getY();
+        double dz = wp.getZ() + 0.5 - player.getZ();
+        double horiz = Math.sqrt(dx * dx + dz * dz);
+        boolean last = pathIdx == path.size() - 1;
+        if (horiz < (last ? 0.3 : 0.5) && Math.abs(dy) < (last ? 0.35 : 0.6)) {
+            advanceStep();
+            return;
+        }
+        if (horiz > 0.15) {
+            float yaw = (float) (Mth.atan2(dz, dx) * Mth.RAD_TO_DEG) - 90.0F;
+            player.setYRot(approach(player.getYRot(), yaw, 45.0F));
+            player.setYHeadRot(player.getYRot());
+            float off = Math.abs(Mth.wrapDegrees(player.getYRot() - yaw));
+            input.forward = off < 50.0F;
+            player.setSprinting(input.forward && path.size() - pathIdx > 4 && off < 15.0F);
+        }
+        if (dy > 0.25) {
+            input.jump = true;
+        } else if (dy < -0.25) {
+            input.sneak = true;
+        }
+        if (++stuckTicks >= 30) {
+            if (player.position().distanceTo(stuckCheckPos) < 0.4) {
+                if (++stuckStrikes >= 2) {
+                    retryOrSkip("got stuck while flying");
+                    return;
+                }
+            }
+            stuckTicks = 0;
+            stuckCheckPos = player.position();
+        }
+    }
+
+    private static void ensureFlying(LocalPlayer player) {
+        if (player.getAbilities().mayfly && !player.getAbilities().flying) {
+            player.getAbilities().flying = true;
+            player.onUpdateAbilities();
+        }
+    }
+
+    /** Sneaking while flying sinks you; hold jump too so we hover in place while placing. */
+    private static void hover(LocalPlayer player) {
+        if (player.getAbilities().flying) {
+            input.jump = true;
+        }
+    }
+
+    /** Creative: a dirt column straight down from under {@code target} to the first solid block. */
+    @Nullable
+    private static List<BlockPos> supportColumn(ClientLevel level, BlockPos target) {
+        List<BlockPos> col = new ArrayList<>();
+        BlockPos p = target.below();
+        while (p.getY() > level.getMinBuildHeight() && GhostBlocks.isEmpty(level.getBlockState(p))) {
+            if (bp.blocks.containsKey(p)) {
+                return null; // would run through the build
+            }
+            col.add(p);
+            p = p.below();
+        }
+        if (col.isEmpty() || p.getY() <= level.getMinBuildHeight()) {
+            return null;
+        }
+        java.util.Collections.reverse(col); // bottom first, each one sits on the last
+        return col;
+    }
+
+    /** Creative: put the item into a hotbar slot straight from the creative inventory. */
+    private static int giveCreative(LocalPlayer player, Item item) {
+        Inventory inv = player.getInventory();
+        int target = -1;
+        for (int i = 0; i < 9; i++) {
+            if (inv.getItem(i).isEmpty()) {
+                target = i;
+                break;
+            }
+        }
+        if (target < 0) {
+            target = inv.selected;
+        }
+        ItemStack stack = new ItemStack(item, item.getDefaultMaxStackSize());
+        inv.setItem(target, stack);
+        MC.gameMode.handleCreativeModeItemAdd(stack, 36 + target); // 36..44 = hotbar in the inventory menu
+        return target;
+    }
+
     private static void resetStep() {
         stepTicks = 0;
         stepPlaced = false;
     }
 
     private static void advanceStep() {
+        lastProgressTick = ticks;
         pathIdx++;
         resetStep();
         stuckTicks = 0;
@@ -648,6 +904,8 @@ public final class AutoBuilder {
             case WALK -> walkStep(level, player, step.pos(), false);
             case PILLAR -> pillarStep(level, player, step.pos());
             case BRIDGE -> bridgeStep(level, player, step.pos());
+            case FLY -> flyStep(level, player, step.pos());
+            case MINE -> mineStep(level, player, step.pos());
         }
     }
 
@@ -672,11 +930,24 @@ public final class AutoBuilder {
         float off = Math.abs(Mth.wrapDegrees(player.getYRot() - yaw));
         input.forward = off < 60.0F && !(last && horiz < 0.4);
         input.sneak = sneak;
+        // Sprint on longer stretches of plain walking.
+        boolean longWalk = path.size() - pathIdx > 3 && !sneak && !player.onClimbable() && !player.isInWater();
+        player.setSprinting(longWalk && input.forward && off < 20.0F);
 
         boolean higher = wp.getY() > Mth.floor(player.getY() + 0.05);
         if ((higher && horiz < 1.6 && player.onGround()) || (player.isInWater() && wp.getY() >= player.getY() - 0.2)) {
             input.jump = true;
         }
+        if (player.onClimbable()) {
+            // On a ladder: holding jump climbs; doing nothing slides down.
+            if (wp.getY() > player.getY() - 0.05) {
+                input.jump = true;
+            }
+            if (horiz < 0.3) {
+                input.forward = false; // stay on the ladder instead of pushing off it
+            }
+        }
+        openDoorAhead(level, player, wp);
 
         // Stuck detection: if we haven't moved much in 1.5s, re-plan; give up after a few tries.
         if (++stuckTicks >= 30) {
@@ -689,6 +960,98 @@ public final class AutoBuilder {
             }
             stuckTicks = 0;
             stuckCheckPos = player.position();
+        }
+    }
+
+    /** Break whatever of ours is in the way (head first, then feet), then step through. */
+    private static void mineStep(ClientLevel level, LocalPlayer player, BlockPos to) {
+        if (++stepTicks > 400) {
+            MC.gameMode.stopDestroyBlock();
+            retryOrSkip("couldn't break through to get out");
+            return;
+        }
+        for (BlockPos c : new BlockPos[]{to.above(), to}) {
+            BlockState s = level.getBlockState(c);
+            if (PathFinder.passable(level, c)) {
+                continue;
+            }
+            if (breakCount.getOrDefault(c, 0) >= MAX_BREAKS_PER_SPOT) {
+                retryOrSkip("would have to break the same block too many times");
+                return;
+            }
+            selectBestTool(player, s);
+            Vec3 eye = player.getEyePosition();
+            Direction face = Direction.getNearest(eye.x - (c.getX() + 0.5), eye.y - (c.getY() + 0.5), eye.z - (c.getZ() + 0.5));
+            lookAt(player, Vec3.atCenterOf(c).add(Vec3.atLowerCornerOf(face.getNormal()).scale(0.5)));
+            if (!MC.gameMode.isDestroying()) {
+                MC.gameMode.startDestroyBlock(c, face);
+            } else {
+                MC.gameMode.continueDestroyBlock(c, face);
+            }
+            player.swing(InteractionHand.MAIN_HAND);
+            if (GhostBlocks.isEmpty(level.getBlockState(c))) {
+                breakCount.merge(c.immutable(), 1, Integer::sum);
+                lastProgressTick = ticks;
+            }
+            return; // keep mining next tick
+        }
+        walkStep(level, player, to, false);
+    }
+
+    /** Built blueprint blocks and our scaffold dirt near us that a break-through path may go through. */
+    private static Set<BlockPos> breakableNear(ClientLevel level, LocalPlayer player) {
+        Set<BlockPos> out = new HashSet<>();
+        BlockPos me = player.blockPosition();
+        for (BlockPos p : bp.blocks.keySet()) {
+            if (p.distManhattan(me) <= 24 && breakCount.getOrDefault(p, 0) < MAX_BREAKS_PER_SPOT
+                    && !GhostBlocks.isEmpty(level.getBlockState(p))) {
+                out.add(p);
+            }
+        }
+        for (BlockPos p : scaffolds) {
+            if (p.distManhattan(me) <= 24) {
+                out.add(p);
+            }
+        }
+        return out;
+    }
+
+    /** Stuck: for a while, ignore the layer/band/area order and just do anything reachable. */
+    private static void relax(LocalPlayer player) {
+        if (ticks >= relaxUntil) {
+            notify(player, "msg.freecam.buildRelaxed");
+        }
+        relaxUntil = ticks + RELAX_TICKS;
+    }
+
+    private static boolean relaxed() {
+        return ticks < relaxUntil;
+    }
+
+    private static void notify(LocalPlayer player, String key) {
+        player.displayClientMessage(Component.translatable(key), true);
+    }
+
+    /** Opens a closed wooden door / fence gate in the waypoint cell (feet or head height). */
+    private static void openDoorAhead(ClientLevel level, LocalPlayer player, BlockPos wp) {
+        if (ticks - lastDoorClick < 10) {
+            return;
+        }
+        for (BlockPos p : new BlockPos[]{wp, wp.above()}) {
+            BlockState s = level.getBlockState(p);
+            if (!PathFinder.isOpenable(s) || !s.hasProperty(BlockStateProperties.OPEN) || s.getValue(BlockStateProperties.OPEN)) {
+                continue;
+            }
+            if (player.getEyePosition().distanceTo(Vec3.atCenterOf(p)) > reach(player)) {
+                return;
+            }
+            Vec3 eye = player.getEyePosition();
+            Direction face = Direction.getNearest(eye.x - (p.getX() + 0.5), 0, eye.z - (p.getZ() + 0.5));
+            input.sneak = false; // sneaking would place the held block instead of opening the door
+            MC.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, new BlockHitResult(Vec3.atCenterOf(p), face, p, false));
+            player.swing(InteractionHand.MAIN_HAND);
+            lastDoorClick = ticks;
+            return;
         }
     }
 
@@ -806,12 +1169,38 @@ public final class AutoBuilder {
     /** Stop drifting, then line up the action. */
     private static void settle(ClientLevel level, LocalPlayer player) {
         phaseTicks++;
+        player.setSprinting(false);
         Vec3 v = player.getDeltaMovement();
-        boolean still = Math.abs(v.x) < 0.03 && Math.abs(v.z) < 0.03 && (player.onGround() || player.isInWater());
-        if (!still && phaseTicks < 15) {
+        boolean flying = player.getAbilities().flying;
+        boolean still = Math.abs(v.x) < 0.03 && Math.abs(v.z) < 0.03
+                && (flying ? Math.abs(v.y) < 0.05 : (player.onGround() || player.isInWater() || player.onClimbable()));
+        if (!still && phaseTicks < 10) {
             input.sneak = true;
+            hover(player);
             return;
         }
+        prepare(level, player);
+    }
+
+    /**
+     * After finishing a block: keep working from where we stand (anything else in reach that the
+     * build order allows) before walking anywhere. This is the main speed-up.
+     */
+    private static void chainNext(ClientLevel level, LocalPlayer player) {
+        Task next = nextReachable(level, player);
+        if (next == null) {
+            task = null;
+            setPhase(Phase.PLAN);
+            return;
+        }
+        task = next;
+        retries = 0;
+        setPhase(Phase.SETTLE);
+        prepare(level, player);
+    }
+
+    /** Select tool/block, aim, and enter the break or place phase for {@link #task}. */
+    private static void prepare(ClientLevel level, LocalPlayer player) {
         Task t = task;
         if (t == null || !stillPending(level, t)) {
             setPhase(Phase.PLAN);
@@ -834,8 +1223,15 @@ public final class AutoBuilder {
             return;
         }
 
+        if (!t.scaffold() && wouldWallIn(level, player, t.pos())) {
+            retryOrSkip("placing it from here would wall you in");
+            return;
+        }
         Item item = t.target().getBlock().asItem();
         int slot = findSlot(player.getInventory(), item);
+        if (slot < 0 && creative) {
+            slot = giveCreative(player, item);
+        }
         if (slot < 0) {
             skip("item:" + item.getDescription().getString());
             return;
@@ -852,6 +1248,7 @@ public final class AutoBuilder {
         player.setYHeadRot(placePlan.yaw());
         player.setXRot(placePlan.pitch());
         input.sneak = true;
+        hover(player);
         setPhase(Phase.PLACE);
     }
 
@@ -862,20 +1259,36 @@ public final class AutoBuilder {
             setPhase(Phase.PLAN);
             return;
         }
-        // Hold rotation + sneak for a couple of ticks so the server has them before the click.
+        // Hold rotation + sneak for a tick so the server has them before the click, and keep a
+        // steady vanilla-like click rhythm.
         input.sneak = true;
+        hover(player);
         player.setYRot(plan.yaw());
         player.setYHeadRot(plan.yaw());
         player.setXRot(plan.pitch());
-        if (++phaseTicks < 3) {
+        if (++phaseTicks < 2 || ticks - lastClickTick < CLICK_INTERVAL) {
             return;
         }
         if (!player.getMainHandItem().is(t.target().getBlock().asItem())) {
             setPhase(Phase.SETTLE);
             return;
         }
+        int tries = attempts.merge(t.pos(), 1, Integer::sum);
+        if (tries > MAX_CLICKS) {
+            skip("clicked " + MAX_CLICKS + " times but the block didn't stay (server rejected?)");
+            return;
+        }
         use(player, plan.hit());
-        setPhase(Phase.VERIFY);
+        lastClickTick = ticks;
+        lastProgressTick = ticks;
+        // Don't wait for the server: the client shows the block immediately. If the server rolls
+        // it back, the spot simply becomes pending again and gets retried (up to MAX_CLICKS).
+        if (t.scaffold()) {
+            scaffolds.add(t.pos());
+        }
+        lastArea = areaOf(t.pos());
+        progressSinceRetryRound = true;
+        chainNext(level, player);
     }
 
     private static void verify(ClientLevel level, LocalPlayer player) {
@@ -927,10 +1340,383 @@ public final class AutoBuilder {
     }
 
     private static void done() {
+        lastProgressTick = ticks;
         retries = 0;
         progressSinceRetryRound = true;
+        if (task != null) {
+            lastArea = areaOf(task.pos());
+        }
         task = null;
-        setPhase(Phase.PLAN);
+        if (MC.level != null && MC.player != null) {
+            chainNext(MC.level, MC.player);
+        } else {
+            setPhase(Phase.PLAN);
+        }
+    }
+
+    // ------------------------------------------------------------------ build order
+
+    /** 8x8-column chunks of the build used by the Areas mode. */
+    private static long areaOf(BlockPos p) {
+        return ((long) (p.getX() >> 3) << 32) ^ ((p.getZ() >> 3) & 0xffffffffL);
+    }
+
+    private static double areaRank(BlockPos p, Vec3 me) {
+        long a = areaOf(p);
+        if (a == lastArea) {
+            return 0;
+        }
+        double cx = ((p.getX() >> 3) << 3) + 4, cz = ((p.getZ() >> 3) << 3) + 4;
+        double dx = cx - me.x, dz = cz - me.z;
+        return 1 + Math.floor(Math.sqrt(dx * dx + dz * dz) / 8.0);
+    }
+
+    /**
+     * The next job doable without moving, respecting the build order:
+     * digs before placements; Layers mode = only the lowest unfinished layer of the whole build
+     * (highest for digs); Areas mode = the lowest unfinished layer within that block's area.
+     */
+    @Nullable
+    private static Task nextReachable(ClientLevel level, LocalPlayer player) {
+        Vec3 eye = player.getEyePosition();
+        double r = reach(player) - 0.3;
+        BlockPos feet = BlockPos.containing(player.getX(), player.getY() + 0.5, player.getZ());
+
+        if (!supportQueue.isEmpty()) {
+            BlockPos s = supportQueue.peek();
+            if (GhostBlocks.isEmpty(level.getBlockState(s)) && !skipped.containsKey(s)
+                    && eye.distanceTo(Vec3.atCenterOf(s)) <= r && PlacementPlanner.hasSupport(level, s)
+                    && !s.equals(feet) && !s.equals(feet.above())) {
+                return new Task(s, SCAFFOLD_STATE, false, true);
+            }
+            return null; // let the planner walk us to the chain
+        }
+
+        boolean anyDig = false;
+        int maxDigY = Integer.MIN_VALUE, minPlaceY = Integer.MAX_VALUE;
+        Map<Long, Integer> areaMinY = new HashMap<>();
+        for (Map.Entry<BlockPos, BlockState> e : bp.blocks.entrySet()) {
+            BlockPos pos = e.getKey();
+            if (skipped.containsKey(pos) || !level.isLoaded(pos)) {
+                continue;
+            }
+            Boolean dig = classify(level, pos, e.getValue());
+            if (dig == null) {
+                continue;
+            }
+            if (dig) {
+                anyDig = true;
+                maxDigY = Math.max(maxDigY, pos.getY());
+            } else if (ready(level, pos, e.getValue())) {
+                minPlaceY = Math.min(minPlaceY, pos.getY());
+                areaMinY.merge(areaOf(pos), pos.getY(), Math::min);
+            }
+        }
+
+        Task best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (Map.Entry<BlockPos, BlockState> e : bp.blocks.entrySet()) {
+            BlockPos pos = e.getKey();
+            if (skipped.containsKey(pos) || pos.equals(feet) || pos.equals(feet.above())) {
+                continue;
+            }
+            double dist = eye.distanceTo(Vec3.atCenterOf(pos));
+            if (dist > r || !level.isLoaded(pos)) {
+                continue;
+            }
+            Boolean dig = classify(level, pos, e.getValue());
+            if (dig == null) {
+                continue;
+            }
+            double score;
+            if (dig) {
+                if (pos.equals(feet.below()) || level.getBlockState(pos).getDestroySpeed(level, pos) < 0) {
+                    continue;
+                }
+                boolean relax = relaxed();
+                if (!relax && mode == BuildMode.LAYERS && pos.getY() != maxDigY) {
+                    continue;
+                }
+                if (!relax && mode == BuildMode.BANDS && pos.getY() < maxDigY - (BAND - 1)) {
+                    continue;
+                }
+                score = -pos.getY() * 1000.0 + dist;
+            } else {
+                if (anyDig || !ready(level, pos, e.getValue())) {
+                    continue;
+                }
+                if (relaxed()) {
+                    // stuck recently: any reachable, supported block is fair game (still lowest first)
+                } else if (mode == BuildMode.BANDS) {
+                    if (pos.getY() > minPlaceY + BAND - 1) {
+                        continue;
+                    }
+                } else {
+                    int layer = mode == BuildMode.LAYERS ? minPlaceY : areaMinY.getOrDefault(areaOf(pos), pos.getY());
+                    if (pos.getY() != layer) {
+                        continue;
+                    }
+                }
+                if (!creative && findSlot(player.getInventory(), e.getValue().getBlock().asItem()) < 0) {
+                    continue; // the planner will report it as missing
+                }
+                if (wouldWallIn(level, player, pos)) {
+                    continue; // place it later, from somewhere else
+                }
+                score = pos.getY() * 1000.0 + dist;
+            }
+            if (score < bestScore) {
+                bestScore = score;
+                best = new Task(pos.immutable(), e.getValue(), dig, false);
+            }
+        }
+        return best;
+    }
+
+    // ------------------------------------------------------------------ build mode
+
+    /** Layers: one layer at a time. Bands: a sliding 3-layer window. Areas: 8x8 areas one by one. */
+    public enum BuildMode { LAYERS, BANDS, AREAS }
+
+    private static final int BAND = 3;
+
+    public static String modeKey(BuildMode m) {
+        return switch (m) {
+            case LAYERS -> "gui.freecam.modeLayers";
+            case BANDS -> "gui.freecam.modeBands";
+            case AREAS -> "gui.freecam.modeAreas";
+        };
+    }
+
+    /**
+     * Bands: the (up to 3) standing spots near {@code t} that can reach the most unfinished, placeable
+     * blocks in the current band, with a small penalty for being far from us.
+     */
+    private static Set<BlockPos> bestSpots(ClientLevel level, LocalPlayer player, Task t, boolean flying) {
+        int bandMin = lowestPlaceLayer(level);
+        double r = reach(player) - 0.4;
+        List<BlockPos> band = new ArrayList<>();
+        for (Map.Entry<BlockPos, BlockState> e : bp.blocks.entrySet()) {
+            BlockPos p = e.getKey();
+            if (p.getY() < bandMin || p.getY() > bandMin + BAND - 1 || p.distManhattan(t.pos()) > 12
+                    || skipped.containsKey(p) || !level.isLoaded(p)) {
+                continue;
+            }
+            if (Boolean.FALSE.equals(classify(level, p, e.getValue()))) {
+                band.add(p);
+            }
+        }
+        if (band.size() < 2) {
+            return Set.of();
+        }
+        Vec3 me = player.position();
+        List<Map.Entry<BlockPos, Double>> scored = new ArrayList<>();
+        BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dy = -4; dy <= 3; dy++) {
+                for (int dz = -4; dz <= 4; dz++) {
+                    BlockPos feet = m.setWithOffset(t.pos(), dx, dy, dz).immutable();
+                    if (!PathFinder.clear(level, feet) || !canWorkFrom(level, feet, t, player)
+                            || (!flying && !PathFinder.standable(level, feet))) {
+                        continue;
+                    }
+                    Vec3 eye = eyeAt(feet, player);
+                    int cover = 0;
+                    for (BlockPos p : band) {
+                        if (!p.equals(feet) && !p.equals(feet.above()) && eye.distanceTo(Vec3.atCenterOf(p)) <= r) {
+                            cover++;
+                        }
+                    }
+                    double score = cover * 10.0 - Math.sqrt(feet.distToCenterSqr(me)) * 0.5;
+                    scored.add(Map.entry(feet, score));
+                }
+            }
+        }
+        scored.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
+        Set<BlockPos> out = new HashSet<>();
+        for (int i = 0; i < Math.min(3, scored.size()); i++) {
+            out.add(scored.get(i).getKey());
+        }
+        return out;
+    }
+
+    /**
+     * Can this block go in right now? It needs something to click against, and the block itself must
+     * be able to stay there (a ladder needs its wall, a torch its block, a door the floor under it).
+     */
+    private static boolean ready(ClientLevel level, BlockPos pos, BlockState target) {
+        if (!PlacementPlanner.hasSupport(level, pos)) {
+            return false;
+        }
+        try {
+            return target.canSurvive(level, pos);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** Lowest layer that has a placeable (supported) block left - the bottom of the band. */
+    private static int lowestPlaceLayer(ClientLevel level) {
+        int min = Integer.MAX_VALUE;
+        for (Map.Entry<BlockPos, BlockState> e : bp.blocks.entrySet()) {
+            BlockPos pos = e.getKey();
+            if (pos.getY() >= min || skipped.containsKey(pos) || !level.isLoaded(pos)) {
+                continue;
+            }
+            if (Boolean.FALSE.equals(classify(level, pos, e.getValue())) && ready(level, pos, e.getValue())) {
+                min = pos.getY();
+            }
+        }
+        return min == Integer.MAX_VALUE ? 0 : min;
+    }
+
+    // ------------------------------------------------------------------ safety
+
+    /** Blueprint bounds (x/z), used to decide what counts as "outside" for the wall-in check. */
+    private static int bbMinX, bbMaxX, bbMinZ, bbMaxZ;
+
+    private static void computeBounds() {
+        bbMinX = bbMinZ = Integer.MAX_VALUE;
+        bbMaxX = bbMaxZ = Integer.MIN_VALUE;
+        for (BlockPos p : bp.blocks.keySet()) {
+            bbMinX = Math.min(bbMinX, p.getX());
+            bbMaxX = Math.max(bbMaxX, p.getX());
+            bbMinZ = Math.min(bbMinZ, p.getZ());
+            bbMaxZ = Math.max(bbMaxZ, p.getZ());
+        }
+    }
+
+    /**
+     * Would placing at {@code pos} leave us with no way to walk out of the build? Only checked for
+     * blocks close to us (that's how you trap yourself); flying in creative can't be trapped this way.
+     */
+    private static boolean wouldWallIn(ClientLevel level, LocalPlayer player, BlockPos pos) {
+        if (creative) {
+            return false;
+        }
+        return wouldWallInFrom(level, BlockPos.containing(player.getX(), player.getY() + 0.5, player.getZ()), pos, true);
+    }
+
+    /**
+     * Two things make a placement a trap:
+     * <ul>
+     *   <li>we could walk out of the build before it, and can't after; or</li>
+     *   <li>it cuts us off from nearby unfinished work we could reach before (e.g. finishing an attic
+     *       roof from the inside while the eaves outside still need doing).</li>
+     * </ul>
+     * The second rule is relaxed while we're recovering from being stuck.
+     */
+    static boolean wouldWallInFrom(ClientLevel level, BlockPos feet, BlockPos pos, boolean checkWork) {
+        if (creative || pos.distManhattan(feet) > 5) {
+            return false;
+        }
+        java.util.function.Predicate<BlockPos> outside =
+                p -> p.getX() < bbMinX - 1 || p.getX() > bbMaxX + 1 || p.getZ() < bbMinZ - 1 || p.getZ() > bbMaxZ + 1;
+        if (!checkWork) {
+            // Cheap version for the path search: just "can we still walk out?"
+            return PathFinder.canEscape(level, feet, null, outside) && !PathFinder.canEscape(level, feet, pos, outside);
+        }
+        Before b = before(level, feet, outside);
+        Set<BlockPos> after = PathFinder.region(level, feet, pos, p -> false);
+        boolean roomyAfter = after.size() > PathFinder.REGION_LIMIT;
+        boolean escAfter = roomyAfter || after.stream().anyMatch(outside);
+        if (b.escapes() && !escAfter) {
+            return true;
+        }
+        if (roomyAfter || relaxed() || !checkWork) {
+            return false;
+        }
+        double r = reach(MC.player) - 0.4;
+        for (BlockPos w : b.reachableWork()) {
+            if (w.equals(pos) || w.distManhattan(pos) > 8) {
+                continue;
+            }
+            if (!reachableFrom(after, w, r)) {
+                return true; // we'd lose access to this one
+            }
+        }
+        return false;
+    }
+
+    /** Region/escape/reachable-work from where we stand, cached for the tick (many candidates share it). */
+    private record Before(BlockPos feet, int tick, boolean escapes, List<BlockPos> reachableWork) {}
+
+    @Nullable private static Before beforeCache;
+
+    private static Before before(ClientLevel level, BlockPos feet, java.util.function.Predicate<BlockPos> outside) {
+        Before c = beforeCache;
+        if (c != null && c.tick() == ticks && c.feet().equals(feet)) {
+            return c;
+        }
+        Set<BlockPos> region = PathFinder.region(level, feet, null, p -> false);
+        boolean roomy = region.size() > PathFinder.REGION_LIMIT;
+        boolean escapes = roomy || region.stream().anyMatch(outside);
+        List<BlockPos> work = new ArrayList<>();
+        if (!roomy) {
+            double r = reach(MC.player) - 0.4;
+            for (Map.Entry<BlockPos, BlockState> e : bp.blocks.entrySet()) {
+                BlockPos p = e.getKey();
+                if (p.distManhattan(feet) > 13 || skipped.containsKey(p) || !level.isLoaded(p)
+                        || classify(level, p, e.getValue()) == null) {
+                    continue;
+                }
+                if (reachableFrom(region, p, r)) {
+                    work.add(p);
+                    if (work.size() >= 80) {
+                        break;
+                    }
+                }
+            }
+        }
+        c = new Before(feet.immutable(), ticks, escapes, work);
+        beforeCache = c;
+        return c;
+    }
+
+    private static boolean reachableFrom(Set<BlockPos> region, BlockPos target, double r) {
+        Vec3 centre = Vec3.atCenterOf(target);
+        double eye = MC.player.getEyeHeight(net.minecraft.world.entity.Pose.STANDING);
+        for (BlockPos f : region) {
+            if (f.equals(target) || f.above().equals(target)) {
+                continue;
+            }
+            double dx = f.getX() + 0.5 - centre.x, dy = f.getY() + eye - centre.y, dz = f.getZ() + 0.5 - centre.z;
+            if (dx * dx + dy * dy + dz * dz <= r * r) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static BuildMode mode = loadMode();
+
+    public static BuildMode mode() {
+        return mode;
+    }
+
+    public static void toggleMode() {
+        mode = BuildMode.values()[(mode.ordinal() + 1) % BuildMode.values().length];
+        try {
+            java.nio.file.Path f = MC.gameDirectory.toPath().resolve("freecam_ghosts").resolve("buildmode.txt");
+            java.nio.file.Files.createDirectories(f.getParent());
+            java.nio.file.Files.writeString(f, mode.name());
+        } catch (Exception ignored) {
+        }
+        if (MC.player != null) {
+            MC.player.displayClientMessage(Component.translatable("msg.freecam.buildMode",
+                    Component.translatable(modeKey(mode))), true);
+        }
+    }
+
+    private static BuildMode loadMode() {
+        try {
+            java.nio.file.Path f = MC.gameDirectory.toPath().resolve("freecam_ghosts").resolve("buildmode.txt");
+            if (java.nio.file.Files.isRegularFile(f)) {
+                return BuildMode.valueOf(java.nio.file.Files.readString(f).trim());
+            }
+        } catch (Exception ignored) {
+        }
+        return BuildMode.LAYERS;
     }
 
     private static void retryOrSkip(String why) {

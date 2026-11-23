@@ -89,12 +89,21 @@ public class BlueprintDetailScreen extends Screen {
         }).bounds(left + 3 * (bw + 4), y, bw, 20).build());
 
         addRenderableWidget(Button.builder(Component.translatable("gui.back"), b -> onClose())
-                .bounds(width / 2 - 75, height - 26, 150, 20).build());
+                .bounds(width / 2 + 4, height - 26, 150, 20).build());
+        addRenderableWidget(Button.builder(modeLabel(), b -> {
+            AutoBuilder.toggleMode();
+            b.setMessage(modeLabel());
+        }).bounds(width / 2 - 154, height - 26, 150, 20).build());
 
         tableTop = y + 44;
         rows = Math.max(1, (height - 32 - tableTop) / ROW);
         computeNeeds();
         refreshButtons();
+    }
+
+    private static Component modeLabel() {
+        return Component.translatable("gui.freecam.buildModeButton", Component.translatable(
+                AutoBuilder.modeKey(AutoBuilder.mode())));
     }
 
     private void refreshButtons() {

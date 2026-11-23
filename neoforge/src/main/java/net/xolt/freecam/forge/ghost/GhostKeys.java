@@ -18,6 +18,7 @@ public final class GhostKeys {
     public static final KeyMapping FLIGHT_MODE = key("flightMode", KeyModifier.CONTROL, GLFW.GLFW_KEY_F);
     public static final KeyMapping AUTO_BUILD = key("ghostAutoBuild", KeyModifier.CONTROL, GLFW.GLFW_KEY_B);
     public static final KeyMapping OPEN_MENU = key("ghostMenu", KeyModifier.NONE, GLFW.GLFW_KEY_J);
+    public static final KeyMapping BUILD_MODE = key("ghostBuildMode", KeyModifier.CONTROL, GLFW.GLFW_KEY_M);
 
     private GhostKeys() {}
 
@@ -35,5 +36,6 @@ public final class GhostKeys {
         event.register(FLIGHT_MODE);
         event.register(AUTO_BUILD);
         event.register(OPEN_MENU);
+        event.register(BUILD_MODE);
     }
 }

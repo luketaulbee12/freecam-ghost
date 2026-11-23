@@ -76,6 +76,7 @@ public final class GhostRenderer {
                 }
             }
             net.xolt.freecam.forge.ghost.builder.AutoBuilder.renderDebug(pose, buffers);
+            net.xolt.freecam.forge.ghost.design.DesignCommands.renderSelection(pose, buffers);
         }
         if (GhostBlocks.isEditing()) {
             renderCrosshairTarget(level, pose, buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false));
@@ -190,6 +191,10 @@ public final class GhostRenderer {
         }
         LevelRenderer.renderLineBox(pose, buffers.getBuffer(RenderType.lines()),
                 shape.bounds().move(pos).inflate(0.002), r, g, b, a);
+    }
+
+    public static void aabb(PoseStack pose, MultiBufferSource buffers, AABB box, float r, float g, float b, float a) {
+        LevelRenderer.renderLineBox(pose, buffers.getBuffer(RenderType.lines()), box, r, g, b, a);
     }
 
     public static void box(PoseStack pose, MultiBufferSource buffers, BlockPos pos, double inflate,

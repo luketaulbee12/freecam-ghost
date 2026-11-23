@@ -398,6 +398,9 @@ public final class GhostBlocks {
                 AutoBuilder.toggle(Blueprints.activeOrNull());
             }
         }
+        while (GhostKeys.BUILD_MODE.consumeClick()) {
+            AutoBuilder.toggleMode();
+        }
         while (GhostKeys.OPEN_MENU.consumeClick()) {
             if (MC.screen == null) {
                 MC.setScreen(new BlueprintListScreen());
