@@ -23,6 +23,8 @@ public class FreecamForge {
 
     public FreecamForge(ModContainer container) {
         ModConfig.init();
+        Freecam.exitGuard = net.xolt.freecam.forge.ghost.GhostBlocks::allowExit;
+        Freecam.interactionOverride = net.xolt.freecam.forge.ghost.builder.AutoBuilder::isRunning;
         // Register our config screen with Forge
         container.registerExtensionPoint(IConfigScreenFactory.class, (client, parent) ->
                 AutoConfig.getConfigScreen(ModConfig.class, parent).get());
@@ -31,6 +33,7 @@ public class FreecamForge {
     @SubscribeEvent
     public static void registerKeymappings(RegisterKeyMappingsEvent event) {
         ModBindings.forEach(event::register);
+        net.xolt.freecam.forge.ghost.GhostKeys.register(event);
     }
 
     @EventBusSubscriber(bus = EventBusSubscriber.Bus.GAME, value = Dist.CLIENT)

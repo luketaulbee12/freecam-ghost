@@ -92,6 +92,23 @@ public class Freecam {
         return reset;
     }
 
+    /**
+     * Asked before the toggle key turns freecam off. Return false to keep freecam on
+     * (e.g. to show an "unsaved changes" prompt that calls {@link #toggle()} itself).
+     */
+    public static java.util.function.BooleanSupplier exitGuard = () -> true;
+
+    /** True while something (the auto-builder) must interact on the player's behalf during freecam. */
+    public static java.util.function.BooleanSupplier interactionOverride = () -> false;
+
+    @ApiStatus.Internal
+    public static void toggleFromKey() {
+        if (isEnabled() && !exitGuard.getAsBoolean()) {
+            return;
+        }
+        toggle();
+    }
+
     @ApiStatus.AvailableSince("0.3.1")
     public static void toggle() {
         if (isRestrictedOnServer()) {

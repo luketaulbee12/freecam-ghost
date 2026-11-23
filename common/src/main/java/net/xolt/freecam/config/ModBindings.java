@@ -18,7 +18,7 @@ import static org.lwjgl.glfw.GLFW.GLFW_KEY_F4;
 public enum ModBindings {
 
     KEY_TOGGLE(() -> builder("toggle")
-            .action(Freecam::toggle)
+            .action(Freecam::toggleFromKey)
             .holdAction(Freecam::activateTripodHandler)
             .defaultKey(GLFW_KEY_F4)
             .build()),

@@ -58,7 +58,8 @@ public class MultiPlayerGameModeMixin {
 
     @Unique
     private static boolean freecam$disableInteract() {
-        return Freecam.isEnabled() && !Freecam.isPlayerControlEnabled() && !freecam$allowInteract();
+        return Freecam.isEnabled() && !Freecam.isPlayerControlEnabled() && !freecam$allowInteract()
+                && !Freecam.interactionOverride.getAsBoolean();
     }
 
     @Unique
