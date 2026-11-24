@@ -64,7 +64,7 @@ public final class DesignCommands {
                 }))
                 .then(Commands.literal("build")
                         .then(Commands.argument("style", StringArgumentType.word())
-                                .suggests((c, b) -> SharedSuggestionProvider.suggest(Style.PRESETS.keySet(), b))
+                                .suggests((c, b) -> SharedSuggestionProvider.suggest(StyleLoader.all().keySet(), b))
                                 .executes(DesignCommands::build))));
     }
 
@@ -99,10 +99,14 @@ public final class DesignCommands {
     }
 
     private static int styles(CommandContext<CommandSourceStack> c) {
-        for (Style s : Style.PRESETS.values()) {
+        for (Style s : StyleLoader.all().values()) {
             say(Component.literal(" - " + s.id() + ": " + s.displayName() + " (" + s.floors() + " floor"
                     + (s.floors() > 1 ? "s" : "") + ", " + s.roof().name().toLowerCase() + " roof)"));
         }
+        for (String err : StyleLoader.errors) {
+            say(Component.literal(" ! " + err).withStyle(ChatFormatting.RED));
+        }
+        say(Component.literal("Style files: " + StyleLoader.dir()).withStyle(ChatFormatting.GRAY));
         return 1;
     }
 
@@ -121,7 +125,7 @@ public final class DesignCommands {
                     .withStyle(ChatFormatting.RED));
             return 0;
         }
-        Style style = Style.PRESETS.get(StringArgumentType.getString(c, "style"));
+        Style style = StyleLoader.all().get(StringArgumentType.getString(c, "style"));
         if (style == null) {
             say(Component.literal("Unknown style. Try /design styles").withStyle(ChatFormatting.RED));
             return 0;

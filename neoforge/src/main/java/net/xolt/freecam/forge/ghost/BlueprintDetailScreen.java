@@ -37,7 +37,7 @@ public class BlueprintDetailScreen extends Screen {
     private int toDig;
     private int unknown;
     private EditBox nameBox;
-    private Button activeButton, visibleButton, buildButton, deleteButton;
+    private Button activeButton, visibleButton, buildButton, deleteButton, giveButton;
     private boolean confirmDelete;
     private int left, tableTop, tableWidth, rows, scroll;
 
@@ -95,7 +95,12 @@ public class BlueprintDetailScreen extends Screen {
             b.setMessage(modeLabel());
         }).bounds(width / 2 - 154, height - 26, 150, 20).build());
 
-        tableTop = y + 44;
+        giveButton = addRenderableWidget(Button.builder(Component.translatable("gui.freecam.blueprintGiveAll"), b -> {
+            BlueprintMaterials.giveAll(bp);
+            computeNeeds();
+        }).bounds(left, y + 24, tableWidth, 20).build());
+
+        tableTop = y + 68;
         rows = Math.max(1, (height - 32 - tableTop) / ROW);
         computeNeeds();
         refreshButtons();
@@ -119,6 +124,9 @@ public class BlueprintDetailScreen extends Screen {
         if (editingOther) {
             activeButton.active = false;
         }
+        giveButton.active = BlueprintMaterials.canGive() && !bp.blocks.isEmpty();
+        giveButton.setTooltip(giveButton.active ? null : net.minecraft.client.gui.components.Tooltip.create(
+                Component.translatable("gui.freecam.blueprintGiveAllCreativeOnly")));
     }
 
     /** Counts what's still missing from the world, and what the player is carrying. */
