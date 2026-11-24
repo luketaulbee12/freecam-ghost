@@ -56,6 +56,10 @@ public final class DesignCommands {
                                 .suggests((c, b) -> SharedSuggestionProvider.suggest(new String[]{"auto", "north", "south", "east", "west"}, b))
                                 .executes(DesignCommands::front)))
                 .then(Commands.literal("styles").executes(DesignCommands::styles))
+                .then(Commands.literal("export")
+                        .executes(c -> export("site"))
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(c -> export(StringArgumentType.getString(c, "name")))))
                 .then(Commands.literal("clear").executes(c -> {
                     pos1 = pos2 = null;
                     frontOverride = null;
@@ -96,6 +100,22 @@ public final class DesignCommands {
         }
         say(Component.literal("Front: " + d));
         return 1;
+    }
+
+    /** Save the site's terrain (plus a margin) for the Build Studio. */
+    private static int export(String name) {
+        if (MC.level == null || pos1 == null || pos2 == null) {
+            say(Component.literal("Set both corners first (/design pos1, /design pos2).").withStyle(ChatFormatting.RED));
+            return 0;
+        }
+        try {
+            java.nio.file.Path f = SiteExport.export(MC.level, pos1, pos2, name);
+            say(Component.literal("Exported the site for Build Studio: " + f).withStyle(ChatFormatting.GREEN));
+            return 1;
+        } catch (Exception e) {
+            say(Component.literal("Export failed: " + e.getMessage()).withStyle(ChatFormatting.RED));
+            return 0;
+        }
     }
 
     private static int styles(CommandContext<CommandSourceStack> c) {

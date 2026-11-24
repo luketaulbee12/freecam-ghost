@@ -35,11 +35,44 @@ record Style(
         Block window,
         Block door,
         Block trim,           // porch railing / fence
-        Mat chimneyMat
+        Mat chimneyMat,
+        Details details       // optional decorative pieces (all off by default)
 ) {
     enum Roof { GABLE, HIP, FLAT }
 
     enum Foundation { AUTO, SOLID, STILTS }
+
+    /**
+     * Decorative pieces that give a build its character. Every field is optional; null / 0 means off.
+     *
+     * @param eaveTrim      log/planks beam under the roof edge along the eaves
+     * @param porchRoof     extend the roof over the front by one more block, held up by posts
+     * @param roofStairs    weighted mix of stair blocks for the roof (overrides the single roof stair)
+     * @param roofAccent    block sprinkled on top of the roof in patches (e.g. azalea leaves = moss)
+     * @param roofAccentAmount 0..1 how much of the roof gets accents
+     * @param ridgeCap      block along the ridge (slab or trapdoor)
+     * @param windowWidth   1 or 2 blocks wide
+     * @param shutters      trapdoor block for open shutters beside each window
+     * @param planter       block under each window on the outside (leaves = flower box look)
+     * @param doorFrame     log around the door
+     * @param doorStep      block in front of the door (a slab is placed as a top slab, flush with the floor)
+     * @param chimneys      -1 = use the style's chimney flag, else 0, 1 or 2 (one at each roof end)
+     * @param chimneyCap    block on top of each chimney
+     * @param vines         0..1 how much of the outer walls gets vines
+     * @param bushes        leaves block for bushes along the base of the walls
+     * @param bushAmount    0..1 how many bushes
+     * @param lantern       lantern by the door (hangs from the eave if there is one, else on a post)
+     * @param props         blocks set out beside the house (barrels, crates...)
+     */
+    record Details(
+            Block eaveTrim, boolean porchRoof, Mat roofStairs, Block roofAccent, double roofAccentAmount,
+            Block ridgeCap, int windowWidth, Block shutters, Block planter, Block doorFrame, Block doorStep,
+            int chimneys, Block chimneyCap, double vines, Block bushes, double bushAmount, Block lantern,
+            List<Block> props
+    ) {
+        static final Details NONE = new Details(null, false, null, null, 0, null, 1, null, null, null, null,
+                -1, null, 0, null, 0, null, List.of());
+    }
 
     /** A material, optionally a weighted mix (e.g. 70% stone bricks, 30% mossy) picked per position. */
     record Mat(List<Block> blocks, List<Integer> weights) {
@@ -87,7 +120,7 @@ record Style(
                 Mat.of(Blocks.SPRUCE_PLANKS),
                 Blocks.SPRUCE_STAIRS, Blocks.SPRUCE_SLAB, Blocks.SPRUCE_PLANKS,
                 Blocks.GLASS_PANE, Blocks.SPRUCE_DOOR, Blocks.SPRUCE_FENCE,
-                Mat.mix(Blocks.COBBLESTONE, 2, Blocks.STONE_BRICKS, 1)));
+                Mat.mix(Blocks.COBBLESTONE, 2, Blocks.STONE_BRICKS, 1), Details.NONE));
 
         add(new Style("stone_tower", "Stone Tower", 3, 5, Roof.HIP, false, 3, Foundation.SOLID, false, false, 7, 7,
                 Mat.of(Blocks.COBBLED_DEEPSLATE),
@@ -96,7 +129,7 @@ record Style(
                 Mat.of(Blocks.SPRUCE_PLANKS),
                 Blocks.DEEPSLATE_TILE_STAIRS, Blocks.DEEPSLATE_TILE_SLAB, Blocks.DEEPSLATE_TILES,
                 Blocks.GLASS_PANE, Blocks.DARK_OAK_DOOR, Blocks.STONE_BRICK_WALL,
-                Mat.of(Blocks.STONE_BRICKS)));
+                Mat.of(Blocks.STONE_BRICKS), Details.NONE));
 
         add(new Style("stilt_cabin", "Stilt Cabin", 1, 4, Roof.GABLE, true, 3, Foundation.STILTS, true, false, 9, 7,
                 Mat.of(Blocks.SPRUCE_LOG),
@@ -105,7 +138,7 @@ record Style(
                 Mat.of(Blocks.OAK_PLANKS),
                 Blocks.DARK_OAK_STAIRS, Blocks.DARK_OAK_SLAB, Blocks.DARK_OAK_PLANKS,
                 Blocks.GLASS_PANE, Blocks.SPRUCE_DOOR, Blocks.SPRUCE_FENCE,
-                Mat.of(Blocks.COBBLESTONE)));
+                Mat.of(Blocks.COBBLESTONE), Details.NONE));
     }
 
     private static void add(Style s) {

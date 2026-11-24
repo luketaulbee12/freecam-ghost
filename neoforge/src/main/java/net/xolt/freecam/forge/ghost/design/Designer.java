@@ -73,14 +73,19 @@ final class Designer {
         walls();
         roof();
         ladder();
-        if (st.chimney() && !stilts && st.roof() == Style.Roof.GABLE) {
-            chimney();
+        int chimneys = d().chimneys() >= 0 ? d().chimneys() : (st.chimney() ? 1 : 0);
+        if (!stilts && st.roof() == Style.Roof.GABLE) {
+            for (int end = 0; end < chimneys; end++) {
+                chimney(end);
+            }
         }
         if (porchDepth > 0) {
             porch();
         }
         stepsAndPath();
+        details();
         clearInterior();
+        applyRoofMix();
         normalizeShapes();
         out.entrySet().removeIf(e -> level.getBlockState(e.getKey()) == e.getValue());
 
@@ -395,6 +400,7 @@ final class Designer {
                             put(p, axis(st.frameMat().pick(p), alongX ? Direction.Axis.X : Direction.Axis.Z));
                         } else if (isWindow(idx, len, dy, x, z)) {
                             put(p, st.window().defaultBlockState());
+                            windows.add(new WindowCell(p, outward(x, z), alongX ? Direction.EAST : Direction.SOUTH));
                         } else {
                             put(p, st.wallMat().pick(p).defaultBlockState());
                         }
@@ -419,10 +425,49 @@ final class Designer {
                 return false;
             }
         }
+        boolean wide = d().windowWidth() >= 2;
         if (st.framed()) {
-            return idx % 4 == 2;
+            return idx % 4 == 2 || (wide && idx % 4 == 1);
         }
-        return idx % st.windowSpacing() == st.windowSpacing() / 2;
+        int sp = Math.max(wide ? 3 : 2, st.windowSpacing());
+        int m = idx % sp;
+        return m == sp / 2 || (wide && m == sp / 2 + 1 && idx + 1 < len - 1);
+    }
+
+    private Style.Details d() {
+        return st.details();
+    }
+
+    /** Which way a perimeter wall cell faces out of the building. */
+    private Direction outward(int x, int z) {
+        if (z == bz0) return Direction.NORTH;
+        if (z == bz1) return Direction.SOUTH;
+        if (x == bx0) return Direction.WEST;
+        return Direction.EAST;
+    }
+
+    private record WindowCell(BlockPos pos, Direction out, Direction along) {}
+
+    private final List<WindowCell> windows = new ArrayList<>();
+    /** Cells just under the eaves that get the thin eave trim (pos + which way is outward). */
+    private final List<WindowCell> eaveTrimCells = new ArrayList<>();
+
+    /**
+     * Trim should be thin: trapdoors go in closed in the top half of the cell (a fascia board), slabs as
+     * top slabs, logs lie along the run. Full blocks are used as-is.
+     */
+    private static BlockState thin(Block b, Direction out) {
+        BlockState s = b.defaultBlockState();
+        if (b instanceof net.minecraft.world.level.block.TrapDoorBlock) {
+            return s.setValue(BlockStateProperties.HORIZONTAL_FACING, out).setValue(BlockStateProperties.HALF, Half.TOP);
+        }
+        if (s.hasProperty(BlockStateProperties.SLAB_TYPE)) {
+            return s.setValue(BlockStateProperties.SLAB_TYPE, net.minecraft.world.level.block.state.properties.SlabType.TOP);
+        }
+        if (s.hasProperty(BlockStateProperties.AXIS)) {
+            return s.setValue(BlockStateProperties.AXIS, out.getClockWise().getAxis());
+        }
+        return s;
     }
 
     private void putDoor(BlockPos p, boolean lower) {
@@ -512,6 +557,70 @@ final class Designer {
                 }
             }
         }
+
+        // Which side of the span is the front (if the front is an eave side at all)?
+        boolean frontIsLowSide = ridgeAlongX ? front == Direction.NORTH : front == Direction.WEST;
+        boolean frontIsHighSide = ridgeAlongX ? front == Direction.SOUTH : front == Direction.EAST;
+        int eaveLow = 0, eaveHigh = spanLen - 1;
+
+        // Porch roof: one more row out over the front, at eave height, held up by posts at the ends.
+        if (d().porchRoof() && (frontIsLowSide || frontIsHighSide)) {
+            int s = frontIsLowSide ? -1 : spanLen;
+            int y = roofBase - 1;
+            for (int t = runMin; t <= runMax; t++) {
+                put(roofPos(ridgeAlongX, t, spanMin + s, y), stair(frontIsLowSide ? up : down));
+            }
+            // Thin posts (the style's fence/trim) at the two ends only; a middle one on long fronts.
+            int len = runMax - runMin;
+            int doorT = ridgeAlongX ? door.getX() : door.getZ();
+            for (int t = runMin; t <= runMax; t++) {
+                boolean end = t == runMin || t == runMax;
+                boolean mid = len > 10 && t == runMin + len / 2 && Math.abs(t - doorT) > 1;
+                if (!end && !mid) {
+                    continue;
+                }
+                BlockPos col = roofPos(ridgeAlongX, t, spanMin + s, y);
+                int g = site.contains(col.getX(), col.getZ()) ? site.ground(col.getX(), col.getZ()) : y0 - 1;
+                for (int py = Math.min(g + 1, y0); py <= y - 1; py++) {
+                    put(new BlockPos(col.getX(), py, col.getZ()), st.trim().defaultBlockState());
+                }
+            }
+            if (frontIsLowSide) {
+                eaveLow = -1;
+            } else {
+                eaveHigh = spanLen;
+            }
+        }
+
+        // Eave trim goes in thin, just under the outermost eave rows (placed in details(), after shutters).
+        if (d().eaveTrim() != null) {
+            for (int s : new int[]{eaveLow, eaveHigh}) {
+                Direction out = s <= 0 ? down : up;
+                for (int t = runMin; t <= runMax; t++) {
+                    eaveTrimCells.add(new WindowCell(roofPos(ridgeAlongX, t, spanMin + s, roofBase - 2), out, out));
+                }
+            }
+        }
+
+        // Ridge cap along the top.
+        if (d().ridgeCap() != null) {
+            if (spanLen % 2 == 1) {
+                for (int t = runMin; t <= runMax; t++) {
+                    put(roofPos(ridgeAlongX, t, spanMin + rows, roofTop + 1), capState(d().ridgeCap()));
+                }
+                roofTop++;
+            } else {
+                for (int t = runMin; t <= runMax; t++) {
+                    put(roofPos(ridgeAlongX, t, spanMin + rows, roofTop), capState(d().ridgeCap()));
+                    put(roofPos(ridgeAlongX, t, spanMin + rows + 1, roofTop), capState(d().ridgeCap()));
+                }
+            }
+        }
+    }
+
+    /** Slabs/trapdoors sit in the bottom half; anything else as-is. */
+    private static BlockState capState(Block b) {
+        return b.defaultBlockState();
     }
 
     private static BlockPos roofPos(boolean ridgeAlongX, int run, int span, int y) {
@@ -537,13 +646,22 @@ final class Designer {
                 roofTop = y + 1;
                 break;
             }
+            boolean trim = k == 0 && d().eaveTrim() != null;
             for (int x = ax; x <= bxx; x++) {
                 put(new BlockPos(x, y, az), stair(Direction.SOUTH));
                 put(new BlockPos(x, y, bzz), stair(Direction.NORTH));
+                if (trim) {
+                    eaveTrimCells.add(new WindowCell(new BlockPos(x, y - 1, az), Direction.NORTH, Direction.NORTH));
+                    eaveTrimCells.add(new WindowCell(new BlockPos(x, y - 1, bzz), Direction.SOUTH, Direction.SOUTH));
+                }
             }
             for (int z = az + 1; z < bzz; z++) {
                 put(new BlockPos(ax, y, z), stair(Direction.EAST));
                 put(new BlockPos(bxx, y, z), stair(Direction.WEST));
+                if (trim) {
+                    eaveTrimCells.add(new WindowCell(new BlockPos(ax, y - 1, z), Direction.WEST, Direction.WEST));
+                    eaveTrimCells.add(new WindowCell(new BlockPos(bxx, y - 1, z), Direction.EAST, Direction.EAST));
+                }
             }
         }
     }
@@ -562,20 +680,223 @@ final class Designer {
 
     // ------------------------------------------------------------------ details
 
-    private void chimney() {
+    /** Small pieces that give a build its character: windows, door, lantern, plants, props, moss. */
+    private void details() {
+        Style.Details dt = d();
+        Direction along = front.getClockWise();
+
+        // Window shutters (open trapdoors flat against the wall) and planters under the windows.
+        Set<BlockPos> windowSet = new HashSet<>();
+        for (WindowCell w : windows) {
+            windowSet.add(w.pos());
+        }
+        for (WindowCell w : windows) {
+            if (dt.shutters() != null) {
+                for (Direction side : new Direction[]{w.along(), w.along().getOpposite()}) {
+                    BlockPos beside = w.pos().relative(side);
+                    if (windowSet.contains(beside)) {
+                        continue;
+                    }
+                    BlockPos p = beside.relative(w.out());
+                    if (!out.containsKey(p)) {
+                        put(p, prop(prop(prop(dt.shutters().defaultBlockState(),
+                                BlockStateProperties.HORIZONTAL_FACING, w.out()),
+                                BlockStateProperties.OPEN, true),
+                                BlockStateProperties.HALF, Half.BOTTOM));
+                    }
+                }
+            }
+            if (dt.planter() != null && !windowSet.contains(w.pos().below())) {
+                BlockPos p = w.pos().below().relative(w.out());
+                if (!out.containsKey(p)) {
+                    put(p, leaves(dt.planter()));
+                }
+            }
+        }
+
+        // Eave trim: a thin fascia just under the roof edge (after shutters, so it never covers them).
+        if (dt.eaveTrim() != null) {
+            for (WindowCell c : eaveTrimCells) {
+                if (!out.containsKey(c.pos())) {
+                    put(c.pos(), thin(dt.eaveTrim(), c.out()));
+                }
+            }
+        }
+
+        // Door lintel: a beam across the top of the doorway (sides stay wall, like most builds).
+        if (dt.doorFrame() != null) {
+            Direction.Axis wallAxis = along.getAxis();
+            for (int k = -1; k <= 1; k++) {
+                put(door.above(2).relative(along, k), axis(dt.doorFrame(), wallAxis));
+            }
+        }
+        if (dt.doorStep() != null) {
+            BlockPos step = door.relative(front, 1 + porchDepth).below();
+            BlockState cur = out.get(step);
+            if (cur == null || !(cur.getBlock() instanceof StairBlock)) {
+                BlockState s = dt.doorStep().defaultBlockState();
+                put(step, prop(s, BlockStateProperties.SLAB_TYPE, net.minecraft.world.level.block.state.properties.SlabType.TOP));
+            }
+        }
+
+        // Lantern by the door: hanging from the eave if there's one right above, else on a fence post.
+        if (dt.lantern() != null) {
+            BlockPos hang = door.relative(front).relative(along, 2).atY(roofBase - 2);
+            if (out.containsKey(hang.above()) && !out.get(hang.above()).isAir() && !out.containsKey(hang)) {
+                put(hang, prop(dt.lantern().defaultBlockState(), BlockStateProperties.HANGING, true));
+            } else if (!stilts) {
+                BlockPos base = door.relative(front, 1 + porchDepth).relative(along, 2).atY(y0);
+                if (!out.containsKey(base) && site.contains(base.getX(), base.getZ())) {
+                    put(base, st.trim().defaultBlockState());
+                    put(base.above(), dt.lantern().defaultBlockState());
+                }
+            }
+        }
+
+        // Props (barrels, crates...) lined up outside the front corner on the left.
+        if (!dt.props().isEmpty() && !stilts) {
+            BlockPos corner = frontCorner(along.getOpposite()).atY(y0);
+            for (int i = 0; i < dt.props().size(); i++) {
+                BlockPos p = corner.relative(along.getOpposite()).relative(front.getOpposite(), i);
+                if (!out.containsKey(p) && site.contains(p.getX(), p.getZ())) {
+                    put(p, dt.props().get(i).defaultBlockState());
+                }
+            }
+        }
+
+        // Bushes along the base of the walls (not in front of the door or on the path).
+        if (dt.bushes() != null && dt.bushAmount() > 0 && !stilts) {
+            for (int x = bx0 - 1; x <= bx1 + 1; x++) {
+                for (int z = bz0 - 1; z <= bz1 + 1; z++) {
+                    if (inBuilding(x, z) || reserved.contains(col(x, z)) || !site.contains(x, z) || site.isWater(x, z)) {
+                        continue;
+                    }
+                    BlockPos p = new BlockPos(x, y0, z);
+                    if (out.containsKey(p) || chance(p, 11) >= dt.bushAmount()) {
+                        continue;
+                    }
+                    put(p, leaves(dt.bushes()));
+                }
+            }
+        }
+
+        // Vines hanging down the outer walls in a few places.
+        if (dt.vines() > 0) {
+            int topY = roofBase - 2;
+            for (int x = bx0; x <= bx1; x++) {
+                for (int z = bz0; z <= bz1; z++) {
+                    boolean corner = (x == bx0 || x == bx1) && (z == bz0 || z == bz1);
+                    if (!onPerimeter(x, z) || corner) {
+                        continue;
+                    }
+                    BlockPos column = new BlockPos(x, topY, z);
+                    if (chance(column, 23) >= dt.vines()) {
+                        continue;
+                    }
+                    Direction o = outward(x, z);
+                    int len = 1 + (int) (chance(column, 29) * 3);
+                    int start = topY;
+                    while (start > y0 && out.containsKey(new BlockPos(x, start, z).relative(o))) {
+                        start--; // start just under any eave trim
+                    }
+                    for (int y = start; y > start - len && y >= y0; y--) {
+                        BlockPos wall = new BlockPos(x, y, z);
+                        BlockPos p = wall.relative(o);
+                        if (windowSet.contains(wall) || out.containsKey(p)) {
+                            break;
+                        }
+                        put(p, Blocks.VINE.defaultBlockState().setValue(
+                                net.minecraft.world.level.block.VineBlock.getPropertyForFace(o.getOpposite()), true));
+                    }
+                }
+            }
+        }
+
+        // Moss/leaf patches lying on the roof.
+        if (dt.roofAccent() != null && dt.roofAccentAmount() > 0) {
+            List<BlockPos> tops = new ArrayList<>();
+            for (Map.Entry<BlockPos, BlockState> e : out.entrySet()) {
+                if (e.getValue().getBlock() instanceof StairBlock && e.getKey().getY() >= roofBase - 1) {
+                    tops.add(e.getKey().above());
+                }
+            }
+            for (BlockPos p : tops) {
+                // Patchy, not speckled: decide per 2x2 area.
+                BlockPos patch = new BlockPos(p.getX() >> 1, p.getY(), p.getZ() >> 1);
+                if (!out.containsKey(p) && chance(patch, 31) < dt.roofAccentAmount()) {
+                    put(p, leaves(dt.roofAccent()));
+                }
+            }
+        }
+    }
+
+    /** The front corner of the building on the given side (outside the walls' footprint corner). */
+    private BlockPos frontCorner(Direction side) {
+        int x = switch (front) {
+            case WEST -> bx0;
+            case EAST -> bx1;
+            default -> side == Direction.WEST ? bx0 : side == Direction.EAST ? bx1 : (bx0 + bx1) / 2;
+        };
+        int z = switch (front) {
+            case NORTH -> bz0;
+            case SOUTH -> bz1;
+            default -> side == Direction.NORTH ? bz0 : side == Direction.SOUTH ? bz1 : (bz0 + bz1) / 2;
+        };
+        return new BlockPos(x, y0, z);
+    }
+
+    /** Deterministic 0..1 value per position (so a design regenerates the same way). */
+    private static double chance(BlockPos p, int salt) {
+        long h = (p.asLong() + salt * 0x632BE59BD9B4E019L) * 0x9E3779B97F4A7C15L;
+        h ^= h >>> 31;
+        return (h & 0xFFFFFF) / (double) 0x1000000;
+    }
+
+    /** Leaves that won't decay (persistent), so planters and bushes stay. */
+    private static BlockState leaves(Block b) {
+        return prop(b.defaultBlockState(), BlockStateProperties.PERSISTENT, true);
+    }
+
+    private static <T extends Comparable<T>> BlockState prop(BlockState s, net.minecraft.world.level.block.state.properties.Property<T> p, T v) {
+        return s.hasProperty(p) ? s.setValue(p, v) : s;
+    }
+
+    /** Swap the single roof stair for the style's weighted mix, keeping each stair's shape and facing. */
+    private void applyRoofMix() {
+        Style.Mat mix = d().roofStairs();
+        if (mix == null) {
+            return;
+        }
+        for (Map.Entry<BlockPos, BlockState> e : out.entrySet()) {
+            BlockState s = e.getValue();
+            if (s.is(st.roofStairs())) {
+                Block pick = mix.pick(e.getKey());
+                if (pick instanceof StairBlock) {
+                    e.setValue(pick.withPropertiesOf(s));
+                }
+            }
+        }
+    }
+
+    /** A chimney against one gable end ({@code end} 0 or 1), up past the ridge, with an optional cap. */
+    private void chimney(int end) {
         boolean ridgeAlongX = (bx1 - bx0) >= (bz1 - bz0);
         int x, z;
         if (ridgeAlongX) {
-            x = bx0 - 1;
+            x = end == 0 ? bx0 - 1 : bx1 + 1;
             z = (bz0 + bz1) / 2;
         } else {
             x = (bx0 + bx1) / 2;
-            z = bz0 - 1;
+            z = end == 0 ? bz0 - 1 : bz1 + 1;
         }
         int g = site.contains(x, z) ? site.ground(x, z) : y0 - 1;
-        for (int y = Math.min(g + 1, y0 - 1); y <= roofTop + 2; y++) {
+        int top = roofTop + 2;
+        for (int y = Math.min(g + 1, y0 - 1); y <= top; y++) {
             BlockPos p = new BlockPos(x, y, z);
             put(p, st.chimneyMat().pick(p).defaultBlockState());
+        }
+        if (d().chimneyCap() != null) {
+            put(new BlockPos(x, top + 1, z), d().chimneyCap().defaultBlockState());
         }
     }
 

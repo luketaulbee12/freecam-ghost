@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Build Studio</title>
+  <style>
+    :root {
+      --bg: #12151a; --panel: #1b2028; --text: #e6e9ee; --muted: #8b95a5; --accent: #6aa8ff; --border: #2a313c;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+    #app { display: flex; height: 100%; }
+    aside { width: 280px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
+      padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+    h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+    label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    select, button { width: 100%; padding: 7px 8px; border-radius: 6px; border: 1px solid var(--border);
+      background: #232a34; color: var(--text); font: inherit; }
+    button { cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row input { margin: 0; }
+    #status { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+    main { flex: 1; position: relative; min-width: 0; }
+    canvas { display: block; }
+    #hint { position: absolute; left: 12px; bottom: 10px; color: #ffffffb0; font-size: 12px;
+      text-shadow: 0 1px 2px #000; pointer-events: none; }
+    @media (max-width: 700px) {
+      #app { flex-direction: column; }
+      aside { width: 100%; max-height: 45%; }
+    }
+  </style>
+  <script type="importmap">
+    { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <h1>Build Studio</h1>
+    <div>
+      <label for="site">Terrain (from /design export)</label>
+      <select id="site"></select>
+    </div>
+    <div>
+      <label for="bp">Design (blueprint)</label>
+      <select id="bp"></select>
+    </div>
+    <div class="row"><input type="checkbox" id="showDesign" checked><label for="showDesign" style="margin:0">Show design</label></div>
+    <div class="row"><input type="checkbox" id="highlight"><label for="highlight" style="margin:0">Tint design blocks</label></div>
+    <button class="primary" id="load">Load</button>
+    <div class="row">
+      <button id="viewFront">Front</button>
+      <button id="viewTop">Top</button>
+      <button id="viewIso">3/4</button>
+    </div>
+    <button id="shot">Save screenshot</button>
+    <div id="status">Pick a terrain export and a design, then Load.</div>
+  </aside>
+  <main id="view"><div id="hint">Drag to orbit · right-drag to pan · scroll to zoom</div></main>
+</div>
+<script type="module" src="/web/viewer.js"></script>
+</body>
+</html>

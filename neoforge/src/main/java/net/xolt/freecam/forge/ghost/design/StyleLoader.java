@@ -90,7 +90,49 @@ final class StyleLoader {
                 block(m, "window"),
                 block(m, "door"),
                 block(m, "trim"),
-                m.has("chimney") ? mat(m, "chimney") : mat(m, "foundation"));
+                m.has("chimney") ? mat(m, "chimney") : mat(m, "foundation"),
+                details(o.getAsJsonObject("details")));
+    }
+
+    /** Optional "details" section; anything missing stays off. */
+    private static Style.Details details(@org.jetbrains.annotations.Nullable JsonObject d) {
+        if (d == null) {
+            return Style.Details.NONE;
+        }
+        List<Block> props = new ArrayList<>();
+        if (d.has("props")) {
+            for (JsonElement e : d.getAsJsonArray("props")) {
+                props.add(lookup(e.getAsString(), "props"));
+            }
+        }
+        return new Style.Details(
+                optBlock(d, "eaveTrim"),
+                bool(d, "porchRoof", false),
+                d.has("roofStairs") ? mat(d, "roofStairs") : null,
+                optBlock(d, "roofAccent"),
+                dbl(d, "roofAccentAmount", 0.15),
+                optBlock(d, "ridgeCap"),
+                clamp(num(d, "windowWidth", 1), 1, 2),
+                optBlock(d, "shutters"),
+                optBlock(d, "planter"),
+                optBlock(d, "doorFrame"),
+                optBlock(d, "doorStep"),
+                d.has("chimneys") ? clamp(num(d, "chimneys", 1), 0, 2) : -1,
+                optBlock(d, "chimneyCap"),
+                dbl(d, "vines", 0),
+                optBlock(d, "bushes"),
+                dbl(d, "bushAmount", 0.35),
+                optBlock(d, "lantern"),
+                props);
+    }
+
+    @org.jetbrains.annotations.Nullable
+    private static Block optBlock(JsonObject o, String key) {
+        return o.has(key) && !o.get(key).isJsonNull() ? lookup(o.get(key).getAsString(), key) : null;
+    }
+
+    private static double dbl(JsonObject o, String k, double def) {
+        return o.has(k) ? Math.max(0, Math.min(1, o.get(k).getAsDouble())) : def;
     }
 
     /** "minecraft:stone" or {"minecraft:stone_bricks": 7, "minecraft:mossy_stone_bricks": 2}. */

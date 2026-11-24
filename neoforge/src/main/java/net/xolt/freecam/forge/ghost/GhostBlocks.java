@@ -323,7 +323,32 @@ public final class GhostBlocks {
 
     /** True if the real block already matches what the blueprint wants there. */
     public static boolean isSatisfied(BlockState real, BlockState target) {
-        return target.isAir() ? isEmpty(real) : real.getBlock() == target.getBlock();
+        if (target.isAir()) {
+            return isEmpty(real);
+        }
+        return real.getBlock() == target.getBlock() && !needsToggle(real, target);
+    }
+
+    /**
+     * Right block, but open where the blueprint wants it closed (or the other way round): shutters,
+     * doors, gates. Placing always gives the closed version, so these need one extra click.
+     */
+    public static boolean needsToggle(BlockState real, BlockState target) {
+        var open = net.minecraft.world.level.block.state.properties.BlockStateProperties.OPEN;
+        if (real.getBlock() != target.getBlock() || !real.hasProperty(open) || !target.hasProperty(open)) {
+            return false;
+        }
+        if (real.getValue(open) == target.getValue(open)) {
+            return false;
+        }
+        var b = real.getBlock();
+        if (b instanceof net.minecraft.world.level.block.TrapDoorBlock) {
+            return b != net.minecraft.world.level.block.Blocks.IRON_TRAPDOOR; // iron ones need redstone
+        }
+        if (b instanceof net.minecraft.world.level.block.DoorBlock d) {
+            return d.type().canOpenByHand();
+        }
+        return b instanceof net.minecraft.world.level.block.FenceGateBlock;
     }
 
     // ------------------------------------------------------------------ input

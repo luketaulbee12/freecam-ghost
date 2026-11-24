@@ -99,6 +99,12 @@ public final class AutoBuilder {
     private static int lastDoorClick = -100;
     private static int lastClickTick = -100;
     private static int lastProgressTick;
+    private static boolean toggleClick;
+
+    /** The block is already there but has to be opened/closed to match the blueprint. */
+    private static boolean isToggle(ClientLevel level, Task t) {
+        return !t.dig() && GhostBlocks.needsToggle(level.getBlockState(t.pos()), t.target());
+    }
     private static int relaxUntil;
     private static final int RELAX_TICKS = 20 * 30;
     private static final int MAX_BREAKS_PER_SPOT = 2;
@@ -287,8 +293,8 @@ public final class AutoBuilder {
         }
 
         input.clear();
-        if (creative) {
-            ensureFlying(player); // a quick jump release/press would otherwise toggle flight off
+        if (creative && !player.onGround()) {
+            ensureFlying(player); // a quick jump release/press would otherwise toggle flight off (on the ground we just walk)
         }
         if (MC.screen != null && !Freecam.isEnabled()) {
             return; // paused while a menu is open
@@ -346,7 +352,11 @@ public final class AutoBuilder {
         if (target.isAir()) {
             return empty ? null : Boolean.TRUE;
         }
-        if (real.is(target.getBlock()) || isSecondHalf(target)) {
+        if (real.is(target.getBlock())) {
+            // Right block; it may still need opening (shutters, doors) - that's handled as a "place" job.
+            return GhostBlocks.needsToggle(real, target) ? Boolean.FALSE : null;
+        }
+        if (isSecondHalf(target)) {
             return null;
         }
         return empty ? Boolean.FALSE : Boolean.TRUE;
@@ -619,7 +629,7 @@ public final class AutoBuilder {
             return;
         }
 
-        if (!task.dig()) {
+        if (!task.dig() && !isToggle(level, task)) {
             Item item = task.target().getBlock().asItem();
             if (item == Items.AIR) {
                 markSkipped(task.pos(), task.target(), "block has no item form");
@@ -786,13 +796,16 @@ public final class AutoBuilder {
 
     /** Fly toward a waypoint: jump = up, sneak = down while flying in creative. */
     private static void flyStep(ClientLevel level, LocalPlayer player, BlockPos wp) {
-        ensureFlying(player);
+        double needUp = wp.getY() + 0.1 - player.getY();
+        if (needUp > 0.25 || !player.onGround()) {
+            ensureFlying(player); // landing switches flight off; that's fine for moving along the ground
+        }
         double dx = wp.getX() + 0.5 - player.getX();
         double dy = wp.getY() + 0.1 - player.getY();
         double dz = wp.getZ() + 0.5 - player.getZ();
         double horiz = Math.sqrt(dx * dx + dz * dz);
         boolean last = pathIdx == path.size() - 1;
-        if (horiz < (last ? 0.3 : 0.5) && Math.abs(dy) < (last ? 0.35 : 0.6)) {
+        if (horiz < (last ? 0.15 : 0.5) && Math.abs(dy) < (last ? 0.35 : 0.6)) {
             advanceStep();
             return;
         }
@@ -801,12 +814,12 @@ public final class AutoBuilder {
             player.setYRot(approach(player.getYRot(), yaw, 45.0F));
             player.setYHeadRot(player.getYRot());
             float off = Math.abs(Mth.wrapDegrees(player.getYRot() - yaw));
-            input.forward = off < 50.0F;
+            input.forward = off < 50.0F && !(last && horiz < 0.15);
             player.setSprinting(input.forward && path.size() - pathIdx > 4 && off < 15.0F);
         }
         if (dy > 0.25) {
             input.jump = true;
-        } else if (dy < -0.25) {
+        } else if (dy < -0.25 && !player.onGround()) {
             input.sneak = true;
         }
         if (++stuckTicks >= 30) {
@@ -918,7 +931,7 @@ public final class AutoBuilder {
         double dz = wp.getZ() + 0.5 - player.getZ();
         double horiz = Math.sqrt(dx * dx + dz * dz);
         boolean last = pathIdx == path.size() - 1;
-        if (horiz < (last || sneak ? 0.25 : 0.45) && Math.abs(player.getY() - wp.getY()) < 0.9) {
+        if (horiz < (last || sneak ? 0.15 : 0.45) && Math.abs(player.getY() - wp.getY()) < 0.9) {
             advanceStep();
             return;
         }
@@ -928,7 +941,10 @@ public final class AutoBuilder {
         player.setYHeadRot(player.getYRot());
         player.setXRot(approach(player.getXRot(), 15.0F, 10.0F));
         float off = Math.abs(Mth.wrapDegrees(player.getYRot() - yaw));
-        input.forward = off < 60.0F && !(last && horiz < 0.4);
+        input.forward = off < 60.0F;
+        if (last && horiz < 0.6) {
+            sneak = true; // creep the last bit so we stop centred on the block (our body must not overlap the next placement)
+        }
         input.sneak = sneak;
         // Sprint on longer stretches of plain walking.
         boolean longWalk = path.size() - pathIdx > 3 && !sneak && !player.onClimbable() && !player.isInWater();
@@ -1179,6 +1195,19 @@ public final class AutoBuilder {
             hover(player);
             return;
         }
+        // Our own body in the way of the block we're about to place? Vanilla refuses the placement,
+        // so shuffle to the centre of the block we're standing on first.
+        Task t = task;
+        if (t != null && !t.dig() && phaseTicks < 30
+                && player.getBoundingBox().intersects(new net.minecraft.world.phys.AABB(t.pos()))) {
+            BlockPos feet = BlockPos.containing(player.getX(), player.getY() + 0.5, player.getZ());
+            double dx = feet.getX() + 0.5 - player.getX(), dz = feet.getZ() + 0.5 - player.getZ();
+            player.setYRot((float) (Mth.atan2(dz, dx) * Mth.RAD_TO_DEG) - 90.0F);
+            input.forward = Math.sqrt(dx * dx + dz * dz) > 0.05;
+            input.sneak = !flying;
+            hover(player);
+            return;
+        }
         prepare(level, player);
     }
 
@@ -1223,6 +1252,19 @@ public final class AutoBuilder {
             return;
         }
 
+        if (isToggle(level, t)) {
+            // Already placed but needs opening/closing: click the block itself, without sneaking.
+            Vec3 eye = player.getEyePosition();
+            Direction face = Direction.getNearest(eye.x - (t.pos().getX() + 0.5), eye.y - (t.pos().getY() + 0.5), eye.z - (t.pos().getZ() + 0.5));
+            Vec3 hitPos = Vec3.atCenterOf(t.pos());
+            lookAt(player, hitPos);
+            placePlan = new PlacementPlanner.Plan(new BlockHitResult(hitPos, face, t.pos(), false),
+                    player.getYRot(), player.getXRot(), 0);
+            toggleClick = true;
+            setPhase(Phase.PLACE);
+            return;
+        }
+        toggleClick = false;
         if (!t.scaffold() && wouldWallIn(level, player, t.pos())) {
             retryOrSkip("placing it from here would wall you in");
             return;
@@ -1261,7 +1303,7 @@ public final class AutoBuilder {
         }
         // Hold rotation + sneak for a tick so the server has them before the click, and keep a
         // steady vanilla-like click rhythm.
-        input.sneak = true;
+        input.sneak = !toggleClick; // sneaking would stop the click from opening a trapdoor/door
         hover(player);
         player.setYRot(plan.yaw());
         player.setYHeadRot(plan.yaw());
@@ -1269,7 +1311,7 @@ public final class AutoBuilder {
         if (++phaseTicks < 2 || ticks - lastClickTick < CLICK_INTERVAL) {
             return;
         }
-        if (!player.getMainHandItem().is(t.target().getBlock().asItem())) {
+        if (!toggleClick && !player.getMainHandItem().is(t.target().getBlock().asItem())) {
             setPhase(Phase.SETTLE);
             return;
         }
@@ -1457,10 +1499,11 @@ public final class AutoBuilder {
                         continue;
                     }
                 }
-                if (!creative && findSlot(player.getInventory(), e.getValue().getBlock().asItem()) < 0) {
+                boolean toggle = GhostBlocks.needsToggle(level.getBlockState(pos), e.getValue());
+                if (!toggle && !creative && findSlot(player.getInventory(), e.getValue().getBlock().asItem()) < 0) {
                     continue; // the planner will report it as missing
                 }
-                if (wouldWallIn(level, player, pos)) {
+                if (!toggle && wouldWallIn(level, player, pos)) {
                     continue; // place it later, from somewhere else
                 }
                 score = pos.getY() * 1000.0 + dist;
