@@ -1,3 +1,18 @@
+# Freecam - Ghost Blocks fork
+
+A fork of [Freecam](https://github.com/MinecraftFreecam/Freecam) (NeoForge 1.21.1) that adds building aids:
+
+- **Ghost blocks** - place and remove see-through planning blocks from freecam; save them as blueprints (**I**).
+- **Blueprints menu** (**J**) - list, show/hide, required resources, Give All Blocks in creative.
+- **Auto-builder** - your player builds a blueprint in survival by itself (no Baritone): pathfinding, pillars,
+  bridges, dirt scaffolding, ladders and doors, several build modes (Ctrl+M), watchable from freecam.
+- **Designer** - `/design` generates a terrain-fitted build from a JSON style; `/design export` saves the
+  surrounding terrain for [Build Studio](https://github.com/luketaulbee12/build-studio).
+
+Blueprints made in Build Studio show up in the J menu automatically. The original Freecam readme follows.
+
+---
+
 # Freecam
 [![Crowdin](https://badges.crowdin.net/freecam/localized.svg)](https://crowdin.com/project/freecam)
 
