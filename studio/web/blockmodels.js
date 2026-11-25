@@ -68,7 +68,7 @@ function variantMatches(key, props) {
   if (key === '' || key === 'normal') return true;
   return key.split(',').every(kv => {
     const [k, v] = kv.split('=');
-    return String(props[k]) === v;
+    return props[k] === undefined || String(props[k]) === v; // unspecified properties match the first variant
   });
 }
 

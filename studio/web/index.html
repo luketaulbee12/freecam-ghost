@@ -7,29 +7,44 @@
   <style>
     :root {
       --bg: #12151a; --panel: #1b2028; --text: #e6e9ee; --muted: #8b95a5; --accent: #6aa8ff; --border: #2a313c;
+      --ok: #7cd992; --warn: #ffcf6a;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-      font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+      font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
     #app { display: flex; height: 100%; }
-    aside { width: 280px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
-      padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
-    h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
-    label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-    select, button { width: 100%; padding: 7px 8px; border-radius: 6px; border: 1px solid var(--border);
+    aside { width: 320px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
+      padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+    h1 { font-size: 16px; margin: 0; }
+    h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 6px 0 0; }
+    section { display: flex; flex-direction: column; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    label { color: var(--muted); font-size: 12px; }
+    select, button, input, textarea { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
       background: #232a34; color: var(--text); font: inherit; }
+    textarea { font: 12px/1.35 ui-monospace, Consolas, monospace; min-height: 180px; resize: vertical; }
     button { cursor: pointer; }
     button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
-    .row { display: flex; gap: 8px; align-items: center; }
-    .row input { margin: 0; }
+    button.active { outline: 2px solid var(--warn); }
+    .row { display: flex; gap: 6px; align-items: center; }
+    .row > * { flex: 1; }
+    .row .k { flex: 0 0 auto; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .check { display: flex; gap: 6px; align-items: center; }
+    .check input { width: auto; }
     #status { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
     main { flex: 1; position: relative; min-width: 0; }
     canvas { display: block; }
-    #hint { position: absolute; left: 12px; bottom: 10px; color: #ffffffb0; font-size: 12px;
+    #hint { position: absolute; left: 12px; bottom: 10px; color: #ffffffd0; font-size: 12px;
       text-shadow: 0 1px 2px #000; pointer-events: none; }
-    @media (max-width: 700px) {
+    #pic { position: absolute; right: 12px; top: 12px; width: 34%; max-width: 460px; display: none;
+      border: 2px solid #ffffff60; border-radius: 6px; background: #000; box-shadow: 0 4px 18px #0008; }
+    #pic img { display: block; width: 100%; border-radius: 4px; }
+    #pic .bar { position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; }
+    #pic .bar button { width: auto; padding: 2px 8px; font-size: 11px; opacity: .85; }
+    @media (max-width: 760px) {
       #app { flex-direction: column; }
-      aside { width: 100%; max-height: 45%; }
+      aside { width: 100%; max-height: 50%; }
+      #pic { width: 45%; }
     }
   </style>
   <script type="importmap">
@@ -43,26 +58,75 @@
 <div id="app">
   <aside>
     <h1>Build Studio</h1>
-    <div>
-      <label for="site">Terrain (from /design export)</label>
-      <select id="site"></select>
-    </div>
-    <div>
-      <label for="bp">Design (blueprint)</label>
+
+    <section>
+      <h2>1 · Terrain</h2>
+      <select id="world"></select>
+      <div class="row">
+        <input id="ax" type="number" placeholder="X" title="X (from F3)">
+        <input id="az" type="number" placeholder="Z" title="Z (from F3)">
+        <input id="ar" type="number" value="64" min="8" max="256" step="16" title="Radius in blocks (up to 256 = 32 chunks across)">
+      </div>
+      <button id="loadArea">Load area</button>
+      <button id="flat" title="Show the selected blueprint on flat grass (no world needed)">Superflat preview</button>
+      <select id="export"><option value="">…or an export from /design export</option></select>
+      <div class="check"><input type="checkbox" id="showBp"><label for="showBp">Show existing blueprint:</label></div>
       <select id="bp"></select>
-    </div>
-    <div class="row"><input type="checkbox" id="showDesign" checked><label for="showDesign" style="margin:0">Show design</label></div>
-    <div class="row"><input type="checkbox" id="highlight"><label for="highlight" style="margin:0">Tint design blocks</label></div>
-    <button class="primary" id="load">Load</button>
+    </section>
+
+    <section>
+      <h2>2 · Plot</h2>
+      <button id="pickPlot">Pick plot (click 2 corners)</button>
+      <div class="row">
+        <label class="k" for="front">Front faces</label>
+        <select id="front">
+          <option>south</option><option>north</option><option>east</option><option>west</option>
+        </select>
+      </div>
+      <div id="plotInfo" style="color:var(--muted)">No plot yet.</div>
+    </section>
+
+    <section>
+      <h2>3 · Design</h2>
+      <select id="style"></select>
+      <div class="grid2">
+        <div><label>Floors</label><input id="p_floors" type="number" min="1" max="6"></div>
+        <div><label>Storey height</label><input id="p_floorHeight" type="number" min="3" max="7"></div>
+        <div><label>Max width</label><input id="p_maxWidth" type="number" min="0" max="40"></div>
+        <div><label>Max depth</label><input id="p_maxDepth" type="number" min="0" max="40"></div>
+        <div><label>Roof</label><select id="p_roof"><option>gable</option><option>hip</option><option>flat</option></select></div>
+        <div><label>Foundation</label><select id="p_foundation"><option>auto</option><option>solid</option><option>stilts</option></select></div>
+      </div>
+      <details>
+        <summary style="cursor:pointer;color:var(--muted)">All settings (JSON)</summary>
+        <textarea id="styleJson" spellcheck="false"></textarea>
+      </details>
+      <div class="check"><input type="checkbox" id="tint"><label for="tint">Tint design blocks</label></div>
+      <div class="check"><input type="checkbox" id="showDesign" checked><label for="showDesign">Show design</label></div>
+    </section>
+
+    <section>
+      <h2>4 · Inspiration</h2>
+      <select id="picture"><option value="">(none)</option></select>
+      <input id="upload" type="file" accept="image/*">
+    </section>
+
+    <section>
+      <h2>5 · Send to game</h2>
+      <input id="bpName" placeholder="Blueprint name">
+      <button class="primary" id="send">Send to game</button>
+    </section>
+
     <div class="row">
-      <button id="viewFront">Front</button>
-      <button id="viewTop">Top</button>
-      <button id="viewIso">3/4</button>
+      <button id="viewFront">Front</button><button id="viewTop">Top</button><button id="viewIso">3/4</button>
     </div>
     <button id="shot">Save screenshot</button>
-    <div id="status">Pick a terrain export and a design, then Load.</div>
+    <div id="status">Pick a world, type the X/Z of the spot (F3 in game), and Load area.</div>
   </aside>
-  <main id="view"><div id="hint">Drag to orbit · right-drag to pan · scroll to zoom</div></main>
+  <main id="view">
+    <div id="pic"><div class="bar"><button id="picSize">Bigger</button><button id="picHide">Hide</button></div><img id="picImg" alt="Inspiration"></div>
+    <div id="hint">Drag to orbit · right-drag to pan · scroll to zoom</div>
+  </main>
 </div>
 <script type="module" src="/web/viewer.js"></script>
 </body>

@@ -206,6 +206,109 @@ def design_site(blueprint_path, cfg, margin=12):
                      dimension=dim, site=[min(xs), min(zs), max(xs), max(zs)])
 
 
+def list_worlds(cfg):
+    """Singleplayer worlds (and configured server worlds) that have region files."""
+    out = []
+    for gd in cfg["gameDirs"]:
+        saves = Path(gd) / "saves"
+        if saves.is_dir():
+            for w in sorted(saves.iterdir(), key=lambda p: -p.stat().st_mtime):
+                if (w / "region").is_dir():
+                    out.append({"name": w.name, "path": str(w), "gameDir": gd, "worldId": "sp_" + sanitize(w.name)})
+    for world_id, path in cfg.get("serverWorlds", {}).items():
+        out.append({"name": f"Server: {world_id}", "path": path, "gameDir": cfg["gameDirs"][0], "worldId": world_id})
+    return out
+
+
+def world_allowed(path, cfg):
+    return any(Path(path).resolve() == Path(w["path"]).resolve() for w in list_worlds(cfg))
+
+
+# ---- NBT writing (just what blueprints need)
+
+def _nbt_str(s):
+    b = s.encode("utf8")
+    return struct.pack(">H", len(b)) + b
+
+
+def _nbt_payload(v):
+    if isinstance(v, bool):
+        return b"\x01", struct.pack(">b", 1 if v else 0)
+    if isinstance(v, str):
+        return b"\x08", _nbt_str(v)
+    if isinstance(v, dict):
+        body = b""
+        for k, x in v.items():
+            t, p = _nbt_payload(x)
+            body += t + _nbt_str(k) + p
+        return b"\x0a", body + b"\x00"
+    if isinstance(v, tuple) and v and v[0] == "intarray":
+        arr = v[1]
+        return b"\x0b", struct.pack(">i", len(arr)) + struct.pack(">%di" % len(arr), *arr)
+    if isinstance(v, list):
+        if not v:
+            return b"\x09", b"\x0a" + struct.pack(">i", 0)
+        t0, _ = _nbt_payload(v[0])
+        return b"\x09", t0 + struct.pack(">i", len(v)) + b"".join(_nbt_payload(x)[1] for x in v)
+    raise TypeError(type(v))
+
+
+def write_nbt(root):
+    t, p = _nbt_payload(root)
+    return gzip.compress(t + _nbt_str("") + p)
+
+
+def parse_state_string(s):
+    name, props = s, {}
+    if "[" in s:
+        name, rest = s.split("[", 1)
+        for kv in rest.rstrip("]").split(","):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                props[k] = v
+    if ":" not in name:
+        name = "minecraft:" + name
+    return name, props
+
+
+def export_blueprint(req, cfg):
+    """Write a studio design as a mod blueprint: <gameDir>/freecam_ghosts/<worldId>/<dimension>/<name>.nbt"""
+    game_dir = req["gameDir"]
+    if game_dir not in cfg["gameDirs"]:
+        raise ValueError("unknown game dir")
+    folder = Path(game_dir) / "freecam_ghosts" / sanitize(req["worldId"]) / sanitize(req.get("dimension", "minecraft_overworld"))
+    folder.mkdir(parents=True, exist_ok=True)
+    index, palette, data = {}, [], []
+    for x, y, z, s in req["blocks"]:
+        if s not in index:
+            index[s] = len(palette)
+            name, props = parse_state_string(s)
+            entry = {"Name": name}
+            if props:
+                entry["Properties"] = props
+            palette.append(entry)
+        data += [int(x), int(y), int(z), index[s]]
+    root = {"palette": palette, "blocks": ("intarray", data), "name": req["name"], "visible": True}
+    f = folder / (sanitize(req["name"]) + ".nbt")
+    f.write_bytes(write_nbt(root))
+    return {"saved": str(f), "blocks": len(req["blocks"])}
+
+
+def list_styles(cfg):
+    out = {}
+    dirs = [HERE / "styles"] + [Path(gd) / "freecam_ghosts" / "styles" for gd in cfg["gameDirs"]]
+    for d in dirs:
+        if d.is_dir():
+            for f in sorted(d.glob("*.json")):
+                try:
+                    s = json.loads(f.read_text())
+                    s.setdefault("id", f.stem)
+                    out[s["id"]] = s
+                except Exception as e:
+                    out[f.stem] = {"id": f.stem, "error": str(e)}
+    return list(out.values())
+
+
 def allowed(path, cfg):
     """Only serve files under the configured game dirs."""
     p = Path(path).resolve()
@@ -275,6 +378,36 @@ class Handler(SimpleHTTPRequestHandler):
                 p = q["path"][0]
                 if allowed(p, cfg):
                     return self.send_json(read_blueprint(p))
+            if url.path == "/api/worlds":
+                return self.send_json(list_worlds(cfg))
+            if url.path == "/api/styles":
+                return self.send_json(list_styles(cfg))
+            if url.path == "/api/area":
+                from region import read_around_fast, region_dir
+                world = q["world"][0]
+                if not world_allowed(world, cfg):
+                    return self.send_json({"error": "unknown world"}, 403)
+                dim = q.get("dim", ["minecraft_overworld"])[0]
+                r = max(8, min(256, int(q.get("r", ["32"])[0])))
+                data = read_around_fast(region_dir(world, dim), int(float(q["x"][0])), int(float(q["z"][0])), r,
+                                   name=f"{Path(world).name} @ {q['x'][0]},{q['z'][0]}", dimension=dim)
+                return self.send_json(data)
+            if url.path == "/api/pictures":
+                pics = DATA / "pictures"
+                files = sorted(pics.glob("*"), key=lambda p: -p.stat().st_mtime) if pics.is_dir() else []
+                return self.send_json([{"name": f.name, "url": "/pictures/" + f.name} for f in files])
+            if url.path.startswith("/meshes/"):
+                f = (DATA / "meshes" / urllib.parse.unquote(url.path[8:])).resolve()
+                if (DATA / "meshes").resolve() in f.parents and f.is_file():
+                    return self.send_file(f, "application/octet-stream")
+            if url.path == "/mesh":
+                return self.send_file(WEB / "mesh.html", "text/html")
+            if url.path.startswith("/pictures/"):
+                f = (DATA / "pictures" / urllib.parse.unquote(url.path[10:])).resolve()
+                if (DATA / "pictures").resolve() in f.parents and f.is_file():
+                    ext = f.suffix.lower()
+                    ctype = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}.get(ext, "image/jpeg")
+                    return self.send_file(f, ctype)
             if url.path == "/api/design_site":
                 p = q["path"][0]
                 if allowed(p, cfg):
@@ -285,6 +418,22 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
+        try:
+            if url.path == "/api/export_blueprint":
+                n = int(self.headers.get("Content-Length", 0))
+                req = json.loads(self.rfile.read(n))
+                return self.send_json(export_blueprint(req, self.cfg))
+            if url.path == "/api/picture":
+                n = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(n)
+                name = urllib.parse.parse_qs(url.query).get("name", ["picture.png"])[0]
+                name = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[-80:]
+                pics = DATA / "pictures"
+                pics.mkdir(parents=True, exist_ok=True)
+                (pics / name).write_bytes(raw)
+                return self.send_json({"name": name, "url": "/pictures/" + name})
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 500)
         if url.path == "/api/screenshot":
             n = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(n)

@@ -32,6 +32,7 @@ public final class Blueprints {
         public final Map<BlockPos, BlockState> blocks = new HashMap<>();
         private boolean visible = true;
         private Path file;
+        private long loadedAt = System.currentTimeMillis();
 
         public String name() {
             return name;
@@ -97,6 +98,39 @@ public final class Blueprints {
             active = list.get(0);
         }
         return true;
+    }
+
+    /** Pick up blueprint files added since loading (e.g. sent from Build Studio), keeping the ones we have. */
+    public static void rescan() {
+        if (dir == null || !Files.isDirectory(dir)) {
+            return;
+        }
+        try (Stream<Path> files = Files.list(dir)) {
+            for (Path f : files.filter(p -> p.toString().endsWith(".nbt")).toList()) {
+                boolean known = list.stream().anyMatch(b -> f.equals(b.file));
+                if (!known) {
+                    Blueprint bp = read(f);
+                    if (bp != null) {
+                        list.add(bp);
+                    }
+                } else {
+                    // Re-read a blueprint the studio overwrote (same name sent again).
+                    for (Blueprint b : list) {
+                        if (f.equals(b.file) && Files.getLastModifiedTime(f).toMillis() > b.loadedAt) {
+                            Blueprint fresh = read(f);
+                            if (fresh != null) {
+                                b.blocks.clear();
+                                b.blocks.putAll(fresh.blocks);
+                                b.loadedAt = fresh.loadedAt;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("Failed to rescan blueprints in {}", dir, e);
+        }
+        list.sort(Comparator.comparing(b -> b.name.toLowerCase()));
     }
 
     static void unload() {
@@ -207,6 +241,7 @@ public final class Blueprints {
             Path tmp = bp.file.resolveSibling(bp.file.getFileName() + ".tmp");
             NbtIo.writeCompressed(root, tmp);
             Files.move(tmp, bp.file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            bp.loadedAt = System.currentTimeMillis() + 1000; // our own write isn't "new from the studio"
         } catch (Exception e) {
             LOG.error("Failed to save blueprint {}", bp.name, e);
         }

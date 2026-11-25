@@ -1,0 +1,6 @@
+{ "name": "Stilt Cabin", "floors": 1, "floorHeight": 4, "roof": "gable", "framed": true, "windowSpacing": 3,
+  "foundation": "stilts", "porch": true, "chimney": false, "maxWidth": 9, "maxDepth": 7,
+  "materials": { "foundation": "minecraft:spruce_log", "wall": "minecraft:spruce_planks", "frame": "minecraft:stripped_spruce_log",
+    "floor": "minecraft:oak_planks", "roofStairs": "minecraft:dark_oak_stairs", "roofSlab": "minecraft:dark_oak_slab",
+    "roofFull": "minecraft:dark_oak_planks", "window": "minecraft:glass_pane", "door": "minecraft:spruce_door",
+    "trim": "minecraft:spruce_fence", "chimney": "minecraft:cobblestone" } }

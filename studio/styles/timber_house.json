@@ -1,0 +1,7 @@
+{ "name": "Timber House", "floors": 2, "floorHeight": 4, "roof": "gable", "framed": true, "windowSpacing": 3,
+  "foundation": "auto", "porch": false, "chimney": true, "maxWidth": 0, "maxDepth": 0,
+  "materials": { "foundation": { "minecraft:cobblestone": 3, "minecraft:mossy_cobblestone": 1 }, "wall": "minecraft:calcite",
+    "frame": "minecraft:dark_oak_log", "floor": "minecraft:spruce_planks", "roofStairs": "minecraft:spruce_stairs",
+    "roofSlab": "minecraft:spruce_slab", "roofFull": "minecraft:spruce_planks", "window": "minecraft:glass_pane",
+    "door": "minecraft:spruce_door", "trim": "minecraft:spruce_fence",
+    "chimney": { "minecraft:cobblestone": 2, "minecraft:stone_bricks": 1 } } }

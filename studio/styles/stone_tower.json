@@ -1,0 +1,7 @@
+{ "name": "Stone Tower", "floors": 3, "floorHeight": 5, "roof": "hip", "framed": false, "windowSpacing": 3,
+  "foundation": "solid", "porch": false, "chimney": false, "maxWidth": 7, "maxDepth": 7,
+  "materials": { "foundation": "minecraft:cobbled_deepslate",
+    "wall": { "minecraft:stone_bricks": 7, "minecraft:mossy_stone_bricks": 2, "minecraft:cracked_stone_bricks": 1 },
+    "frame": "minecraft:polished_andesite", "floor": "minecraft:spruce_planks", "roofStairs": "minecraft:deepslate_tile_stairs",
+    "roofSlab": "minecraft:deepslate_tile_slab", "roofFull": "minecraft:deepslate_tiles", "window": "minecraft:glass_pane",
+    "door": "minecraft:dark_oak_door", "trim": "minecraft:stone_brick_wall", "chimney": "minecraft:stone_bricks" } }

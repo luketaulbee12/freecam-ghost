@@ -428,6 +428,7 @@ public final class GhostBlocks {
         }
         while (GhostKeys.OPEN_MENU.consumeClick()) {
             if (MC.screen == null) {
+                Blueprints.rescan(); // pick up anything sent from Build Studio
                 MC.setScreen(new BlueprintListScreen());
             }
         }
