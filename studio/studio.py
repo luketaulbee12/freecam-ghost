@@ -392,6 +392,8 @@ class Handler(SimpleHTTPRequestHandler):
                 data = read_around_fast(region_dir(world, dim), int(float(q["x"][0])), int(float(q["z"][0])), r,
                                    name=f"{Path(world).name} @ {q['x'][0]},{q['z'][0]}", dimension=dim)
                 return self.send_json(data)
+            if url.path == "/api/recon_status":
+                return self.send_json(recon_status(q.get("id", [""])[0], cfg))
             if url.path == "/api/pictures":
                 pics = DATA / "pictures"
                 files = sorted(pics.glob("*"), key=lambda p: -p.stat().st_mtime) if pics.is_dir() else []
@@ -423,6 +425,9 @@ class Handler(SimpleHTTPRequestHandler):
                 n = int(self.headers.get("Content-Length", 0))
                 req = json.loads(self.rfile.read(n))
                 return self.send_json(export_blueprint(req, self.cfg))
+            if url.path == "/api/recon":
+                n = int(self.headers.get("Content-Length", 0))
+                return self.send_json(start_recon(json.loads(self.rfile.read(n)), self.cfg))
             if url.path == "/api/picture":
                 n = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(n)
@@ -445,6 +450,65 @@ class Handler(SimpleHTTPRequestHandler):
             f.write_bytes(raw)
             return self.send_json({"saved": str(f)})
         self.send_json({"error": "not found"}, 404)
+
+
+# ------------------------------------------------------------------------------- picture -> build (recon)
+RECON_JOBS = {}
+
+
+def recon_dir(cfg):
+    return Path(cfg.get("reconDir", r"C:\Users\Luke\Desktop\Projects\recon"))
+
+
+def start_recon(req, cfg):
+    """Run the recon pipeline (picture -> 3D -> blocks) in the background; the blueprint lands in the game folder."""
+    import subprocess
+    import threading
+    import uuid
+    rd = recon_dir(cfg)
+    py = rd / ".venv" / "Scripts" / "python.exe"
+    if not py.is_file():
+        raise ValueError(f"recon pipeline not found at {rd}")
+    pic = (DATA / "pictures" / Path(req["picture"]).name).resolve()
+    if not pic.is_file():
+        raise ValueError("picture not found - upload it first")
+    name = "".join(c if c.isalnum() or c in " -_" else "_" for c in req.get("name") or pic.stem).strip()[:60] or "Recon"
+    width = max(6, min(96, int(req.get("width", 16))))
+    args = [str(py), "-W", "ignore", "scripts/pipeline.py", str(pic), name, "--width", str(width)]
+    at = req.get("at")
+    if at:
+        args += ["--at", str(int(at[0])), str(int(at[1]))]
+        if req.get("worldPath"):
+            args += ["--world", req["worldPath"]]
+    else:
+        args += ["--at", "0", "0", "--ground", "64"]
+    if req.get("gameDir"):
+        args += ["--game-dir", req["gameDir"]]
+    if req.get("worldId"):
+        args += ["--world-id", req["worldId"]]
+    job = {"id": uuid.uuid4().hex[:8], "name": name, "state": "running", "log": "", "safe": name.replace(" ", "_")}
+    RECON_JOBS[job["id"]] = job
+
+    def run():
+        try:
+            r = subprocess.run(args, cwd=rd, capture_output=True, text=True)
+            job["log"] = (r.stdout + r.stderr)[-6000:]
+            job["state"] = "done" if r.returncode == 0 else "failed"
+        except Exception as e:  # report, don't crash the server
+            job["log"], job["state"] = str(e), "failed"
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"id": job["id"], "name": name}
+
+
+def recon_status(job_id, cfg):
+    job = RECON_JOBS.get(job_id)
+    if not job:
+        return {"error": "unknown job"}
+    out = recon_dir(cfg) / "out"
+    stage = "blocks" if (out / f"{job['safe']}_painted.glb").exists() else \
+        "paint (texturing all sides)" if (out / f"{job['safe']}_hunyuan.glb").exists() else "shape (3D model)"
+    return {"state": job["state"], "stage": stage, "name": job["name"], "log": job["log"][-1500:]}
 
 
 def main():

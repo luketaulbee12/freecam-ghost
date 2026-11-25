@@ -102,7 +102,7 @@ async function loadFlat() {
     const i = (x * d + z) * h;
     blocks[i] = 1; blocks[i + 1] = 1; blocks[i + 2] = 2;
   }
-  setSite({ name: 'superflat', origin, size: [w, h, d], site: [x0, z0, x1, z1],
+  await setSite({ name: 'superflat', origin, size: [w, h, d], site: [x0, z0, x1, z1],
             palette: ['minecraft:air', 'minecraft:dirt', 'minecraft:grass_block[snowy=false]'], blocks }, null);
   S.plot = { x0, z0, x1, z1 };
   status(`Superflat preview of "${b.name}" (${x1 - x0 + 1} x ${z1 - z0 + 1}, ${y1 - y0 + 1} tall).`);
@@ -129,7 +129,7 @@ function setSite(site, world) {
   S.result = null;
   S.framed = false;
   showPlot();
-  rebuild().then(() => status('Terrain loaded. Now "Pick plot" and click two corners on the ground.'));
+  return rebuild().then(() => status('Terrain loaded. Now "Pick plot" and click two corners on the ground.'));
 }
 
 // ------------------------------------------------------------------------------- design
@@ -304,6 +304,38 @@ async function uploadPicture(file) {
   await refreshPictures(res.url);
 }
 
+// ------------------------------------------------------------------------------- picture -> blueprint
+async function buildFromPicture() {
+  const pic = $('picture').value;
+  if (!pic) { status('Pick or upload an inspiration picture first.'); return; }
+  const w = S.world || S.worlds[$('world').value];
+  const body = { picture: pic, width: +$('reconWidth').value || 16, name: (pic.split('/').pop() || 'Recon').replace(/\.[^.]+$/, '') };
+  if (S.plot && S.world) {  // put it on the picked plot, on the real ground
+    body.at = [Math.round((S.plot.x0 + S.plot.x1) / 2), Math.round((S.plot.z0 + S.plot.z1) / 2)];
+    body.worldPath = S.world.path;
+  }
+  if (w) { body.gameDir = w.gameDir; body.worldId = w.worldId; }
+  const job = await (await fetch('/api/recon', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  if (job.error) { status('Error: ' + job.error); return; }
+  const t0 = Date.now();
+  for (;;) {
+    await new Promise(r => setTimeout(r, 3000));
+    const st = await getJSON('/api/recon_status?id=' + job.id);
+    const secs = Math.round((Date.now() - t0) / 1000);
+    if (st.state === 'running') { status(`Building "${job.name}" from the picture... ${st.stage} (${secs}s)`); continue; }
+    if (st.state === 'failed') { status('Picture build failed:\n' + st.log.slice(-600)); return; }
+    break;
+  }
+  S.blueprints = await getJSON('/api/blueprints');
+  $('bp').innerHTML = S.blueprints.map((b, i) => `<option value="${i}">${b.name} · ${b.world}</option>`).join('');
+  const i = S.blueprints.findIndex(b => b.name === job.name);
+  if (i >= 0) $('bp').value = i;
+  $('showBp').checked = true;
+  if (S.plot && S.world) { S.blueprint = await getJSON('/api/blueprint?path=' + encodeURIComponent(S.blueprints[i].path)); await rebuild(); }
+  else await loadFlat();
+  status(`"${job.name}" is ready - shown here, and listed in game under J.`);
+}
+
 // ------------------------------------------------------------------------------- send to game
 async function sendToGame() {
   if (!S.result) { status('Make a design first.'); return; }
@@ -330,6 +362,7 @@ async function screenshot() {
 const guard = fn => () => fn().catch(e => { console.error(e); status('Error: ' + e.message); });
 $('loadArea').onclick = guard(loadArea);
 $('flat').onclick = guard(loadFlat);
+$('recon').onclick = guard(buildFromPicture);
 $('export').onchange = guard(loadExport);
 $('pickPlot').onclick = () => {
   if (!S.site) { status('Load terrain first.'); return; }
